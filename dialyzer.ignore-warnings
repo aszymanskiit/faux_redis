@@ -1,0 +1,7 @@
+# This file intentionally left minimal. Add entries here if you want to
+# suppress specific dialyzer warnings in your own project.
+#
+# Logger macro expands to internal __do_log__/4 and __should_log__/2;
+# Dialyzer does not see them in the PLT. Match dialyzer format output.
+Unknown function 'Elixir.Logger':'__do_log__'/4
+Unknown function 'Elixir.Logger':'__should_log__'/2

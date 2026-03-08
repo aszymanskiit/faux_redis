@@ -1,0 +1,16 @@
+# Compiled files
+/_build/
+/cover/
+*.ez
+
+# Dependencies
+/deps/
+
+# Elixir
+*.beam
+/elixir_ls/
+
+# Misc
+.DS_Store
+*.log
+erl_crash.dump
