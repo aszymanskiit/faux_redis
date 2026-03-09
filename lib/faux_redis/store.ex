@@ -166,6 +166,41 @@ defmodule FauxRedis.Store do
     end
   end
 
+  @spec scan(t(), binary(), non_neg_integer()) :: {t(), {binary(), [binary()]}}
+  def scan(store, _pattern, count) when count <= 0 do
+    {store, {"0", []}}
+  end
+
+  def scan(store, pattern, count) do
+    store = purge_expired(store)
+
+    keys =
+      store.kv
+      |> Map.keys()
+      |> Enum.filter(&match_pattern?(&1, pattern))
+      |> Enum.sort()
+
+    {batch, _rest} = Enum.split(keys, count)
+
+    # Always return cursor "0" – one-shot SCAN is enough for tests using FauxRedis.
+    {store, {"0", batch}}
+  end
+
+  @spec sscan(t(), binary(), binary(), non_neg_integer()) :: {t(), {binary(), [binary()]}}
+  def sscan(store, key, _cursor, _count) do
+    store = purge_expired(store)
+
+    members =
+      case Map.get(store.kv, key) do
+        {:set, set} -> Enum.to_list(set)
+        _ -> []
+      end
+
+    # TemporarySubscriptionsRedis uses SSCAN in a loop until cursor == "0".
+    # Returning all members in a single page with cursor "0" is sufficient.
+    {store, {"0", members}}
+  end
+
   @spec lpush(t(), binary(), [binary()]) :: {t(), non_neg_integer()}
   def lpush(store, key, values) do
     do_push(store, key, values, :left)
@@ -291,6 +326,20 @@ defmodule FauxRedis.Store do
 
   @spec reset(t()) :: t()
   def reset(_store), do: %__MODULE__{}
+
+  # Simple pattern matcher for SCAN-style glob patterns limited to what
+  # TemporarySubscriptions/ejabberd modules actually use (e.g. "*@*").
+  defp match_pattern?(key, "*"), do: true
+
+  defp match_pattern?(key, pattern) when is_binary(key) and is_binary(pattern) do
+    case String.split(pattern, "*") do
+      ["", ""] -> String.contains?(key, "")
+      [prefix, ""] -> String.starts_with?(key, prefix)
+      ["", suffix] -> String.ends_with?(key, suffix)
+      [prefix, suffix] -> String.starts_with?(key, prefix) and String.ends_with?(key, suffix)
+      _ -> key == pattern
+    end
+  end
 
   # Expiration handling
 

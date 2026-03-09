@@ -510,6 +510,24 @@ defmodule FauxRedis.Server do
     {deleted, %{state | store: store}, db}
   end
 
+  defp do_handle(_conn_id, db, %Command{name: "SCAN", args: [cursor | rest]}, state) do
+    # For the purposes of FauxRedis we implement a simplified SCAN:
+    #  * we ignore the incoming cursor and always return a full, single page
+    #  * we respect a minimal subset of options used in our tests:
+    #      SCAN cursor MATCH pattern COUNT n
+    pattern = extract_scan_match(rest) || "*"
+    count = extract_scan_count(rest) || 10
+
+    {store, {next_cursor, keys}} = Store.scan(state.store, pattern, count)
+    { [next_cursor, keys], %{state | store: store}, db}
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "SSCAN", args: [key, cursor | _rest]}, state) do
+    # returned member list; match that behaviour in a simplified form.
+    {store, {next_cursor, members}} = Store.sscan(state.store, key, cursor, 10)
+    { [next_cursor, members], %{state | store: store}, db}
+  end
+
   defp do_handle(_conn_id, db, %Command{name: "EXISTS", args: keys}, state) do
     {store, count} = Store.exists(state.store, keys)
     {count, %{state | store: store}, db}
@@ -704,5 +722,41 @@ defmodule FauxRedis.Server do
 
   defp do_handle(_conn_id, db, _command, state) do
     {{:error, "ERR unknown command"}, state, db}
+  end
+
+  # Helpers for SCAN options (minimal subset used in tests)
+
+  defp extract_scan_match(args) do
+    case Enum.chunk_every(args, 2) do
+      [] ->
+        nil
+
+      chunks ->
+        chunks
+        |> Enum.find_value(fn
+          ["MATCH", pattern] -> pattern
+          _ -> nil
+        end)
+    end
+  end
+
+  defp extract_scan_count(args) do
+    case Enum.chunk_every(args, 2) do
+      [] ->
+        nil
+
+      chunks ->
+        chunks
+        |> Enum.find_value(fn
+          ["COUNT", n] ->
+            case Integer.parse(n) do
+              {int, ""} when int > 0 -> int
+              _ -> nil
+            end
+
+          _ ->
+            nil
+        end)
+    end
   end
 end

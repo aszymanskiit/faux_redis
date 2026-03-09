@@ -67,9 +67,14 @@ defmodule FauxRedis.ServerIntegrationTest do
     Process.delete(:test_socket)
   end
 
-  test "simple PING/ECHO over TCP", %{redis_port: port} do
+  defp connect_and_put_socket(port) do
     socket = connect(port)
     Process.put(:test_socket, socket)
+    socket
+  end
+
+  test "simple PING/ECHO over TCP", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
     responses = send_recv(socket, [["PING"], ["ECHO", "hi"]])
     assert ["PONG", "hi"] == responses
   after
@@ -77,8 +82,7 @@ defmodule FauxRedis.ServerIntegrationTest do
   end
 
   test "stateful GET/SET and MGET/MSET", %{redis_port: port} do
-    socket = connect(port)
-    Process.put(:test_socket, socket)
+    socket = connect_and_put_socket(port)
     _ = send_recv(socket, [["SET", "foo", "bar"]])
     _ = send_recv(socket, [["SET", "baz", "qux"]])
     [foo, mget] = send_recv(socket, [["GET", "foo"], ["MGET", "foo", "baz", "missing"]])
@@ -89,8 +93,7 @@ defmodule FauxRedis.ServerIntegrationTest do
   end
 
   test "pipelining many commands in one TCP frame", %{redis_port: port} do
-    socket = connect(port)
-    Process.put(:test_socket, socket)
+    socket = connect_and_put_socket(port)
 
     payload =
       IO.iodata_to_binary([
@@ -113,8 +116,7 @@ defmodule FauxRedis.ServerIntegrationTest do
   test "mocking with sequential responses", %{redis_server: server, redis_port: port} do
     # Use ECHO (forwarded); GET is handled locally from ETS and would ignore the stub.
     {:ok, _} = FauxRedis.stub(server, :echo, ["one", "two", nil])
-    socket = connect(port)
-    Process.put(:test_socket, socket)
+    socket = connect_and_put_socket(port)
     responses = send_recv(socket, [["ECHO", "a"], ["ECHO", "b"], ["ECHO", "c"]])
     assert ["one", "two", nil] == responses
   after
@@ -130,8 +132,7 @@ defmodule FauxRedis.ServerIntegrationTest do
         :close
       ])
 
-    socket = connect(port)
-    Process.put(:test_socket, socket)
+    socket = connect_and_put_socket(port)
 
     # First ECHO gets delayed (50 ms) but arrives within timeout.
     :ok = :gen_tcp.send(socket, IO.iodata_to_binary(RESP.encode(["ECHO", "x"])))
@@ -191,5 +192,33 @@ defmodule FauxRedis.ServerIntegrationTest do
       |> Enum.sort_by(fn "v" <> rest -> String.to_integer(rest) end)
 
     assert values == Enum.map(1..n, fn i -> "v#{i}" end)
+  end
+
+  test "SSCAN over a set returns all members in a single page", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SADD", "set:key", "a", "b", "c"]])
+    [[cursor, members]] = send_recv(socket, [["SSCAN", "set:key", "0"]])
+
+    assert cursor == "0"
+    assert Enum.sort(members) == ["a", "b", "c"]
+  after
+    cleanup_test_socket()
+  end
+
+  test "SCAN with MATCH and COUNT returns matching keys", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SET", "user1@example.com", "v1"]])
+    _ = send_recv(socket, [["SET", "user2@example.com", "v2"]])
+    _ = send_recv(socket, [["SET", "other", "v3"]])
+
+    [[cursor, keys]] =
+      send_recv(socket, [["SCAN", "0", "MATCH", "*@example.com", "COUNT", "100"]])
+
+    assert cursor == "0"
+    assert Enum.sort(keys) == ["user1@example.com", "user2@example.com"]
+  after
+    cleanup_test_socket()
   end
 end
