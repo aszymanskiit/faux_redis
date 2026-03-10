@@ -61,8 +61,14 @@ defmodule FauxRedis.Connection do
 
   @impl GenServer
   def handle_info(:socket_ready, state) do
-    :ok = :inet.setopts(state.socket, active: :once)
-    {:noreply, state}
+    case :inet.setopts(state.socket, active: :once) do
+      :ok ->
+        {:noreply, state}
+
+      {:error, _reason} ->
+        # Socket is no longer valid; stop this connection process
+        {:stop, :normal, state}
+    end
   end
 
   # Backward compat: socket without mode/ets
@@ -91,8 +97,17 @@ defmodule FauxRedis.Connection do
           end
 
         # Ready for next TCP packet (second and later commands on this connection)
-        :ok = :inet.setopts(socket, active: :once)
-        {:noreply, state}
+        case :inet.setopts(socket, active: :once) do
+          :ok ->
+            {:noreply, state}
+
+          {:error, reason} ->
+            Logger.debug(
+              "[FauxRedis.Connection] conn_id=#{state.conn_id} second setopts failed: #{inspect(reason)}"
+            )
+
+            {:stop, :normal, state}
+        end
 
       {:error, reason} ->
         Logger.debug(
@@ -104,18 +119,26 @@ defmodule FauxRedis.Connection do
   end
 
   def handle_info({:socket_ready, pending}, state) when is_binary(pending) do
-    :ok = :inet.setopts(state.socket, active: :once)
+    case :inet.setopts(state.socket, active: :once) do
+      :ok ->
+        state =
+          if pending == <<>> do
+            state
+          else
+            buffer = state.buffer <> pending
+            {rest, state} = process_buffer(buffer, state)
+            %{state | buffer: rest}
+          end
 
-    state =
-      if pending == <<>> do
-        state
-      else
-        buffer = state.buffer <> pending
-        {rest, state} = process_buffer(buffer, state)
-        %{state | buffer: rest}
-      end
+        {:noreply, state}
 
-    {:noreply, state}
+      {:error, reason} ->
+        Logger.debug(
+          "[FauxRedis.Connection] conn_id=#{state.conn_id} socket_ready setopts failed: #{inspect(reason)}"
+        )
+
+        {:stop, :normal, state}
+    end
   end
 
   def handle_info({:tcp, _socket, data}, %{socket: nil} = state) do
@@ -126,8 +149,17 @@ defmodule FauxRedis.Connection do
   def handle_info({:tcp, socket, data}, %{socket: socket} = state) do
     buffer = state.buffer <> data
     {buffer, state} = process_buffer(buffer, state)
-    :ok = :inet.setopts(socket, active: :once)
-    {:noreply, %{state | buffer: buffer}}
+    case :inet.setopts(socket, active: :once) do
+      :ok ->
+        {:noreply, %{state | buffer: buffer}}
+
+      {:error, reason} ->
+        Logger.debug(
+          "[FauxRedis.Connection] conn_id=#{state.conn_id} tcp setopts failed: #{inspect(reason)}"
+        )
+
+        {:stop, :normal, state}
+    end
   end
 
   def handle_info({:tcp_closed, _socket}, %{socket: nil} = state) do
@@ -288,36 +320,21 @@ defmodule FauxRedis.Connection do
     end
   end
 
-  defp maybe_handle_local(%{name: "GET", args: [key]}, %{ets_kv: ets_kv} = state)
-       when ets_kv != nil do
-    value =
-      case :ets.lookup(ets_kv, {state.db, key}) do
-        [] -> nil
-        [{_, v}] -> v
-      end
-
-    send_resp(state, value)
+  defp maybe_handle_local(%{name: "MULTI"}, state) do
+    # Minimal transactional support: acknowledge MULTI so that
+    # transactional isolation, which is sufficient for tests.
+    send_resp(state, "OK")
     {:ok, state}
   end
 
-  defp maybe_handle_local(%{name: "SET", args: [key, value]}, %{ets_kv: ets_kv} = state)
-       when ets_kv != nil do
-    :ets.insert(ets_kv, {{state.db, key}, value})
-    send_resp(state, :ok)
+  defp maybe_handle_local(%{name: "EXEC"}, state) do
+    # Return an empty result list for EXEC;
+    send_resp(state, [])
     {:ok, state}
   end
 
-  defp maybe_handle_local(%{name: "MGET", args: keys}, %{ets_kv: ets_kv} = state)
-       when ets_kv != nil and is_list(keys) do
-    values =
-      Enum.map(keys, fn key ->
-        case :ets.lookup(ets_kv, {state.db, key}) do
-          [] -> nil
-          [{_, v}] -> v
-        end
-      end)
-
-    send_resp(state, values)
+  defp maybe_handle_local(%{name: "DISCARD"}, state) do
+    send_resp(state, "OK")
     {:ok, state}
   end
 

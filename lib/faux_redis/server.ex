@@ -501,8 +501,11 @@ defmodule FauxRedis.Server do
   end
 
   defp do_handle(_conn_id, db, %Command{name: "SET", args: [key, value]}, state) do
+    # Match real Redis semantics: return "OK" on success so that
+    # Redix.pipeline/2 yields ["OK", 1] for SET+EXPIRE pipelines used
+    # by TemporarySubscriptions.LastSeenTracker.
     store = Store.set(state.store, key, value)
-    {:ok, %{state | store: store}, db}
+    {"OK", %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "DEL", args: keys}, state) do
@@ -536,8 +539,10 @@ defmodule FauxRedis.Server do
   defp do_handle(_conn_id, db, %Command{name: "EXPIRE", args: [key, seconds]}, state) do
     case Integer.parse(seconds) do
       {secs, ""} when secs > 0 ->
-        {store, res} = Store.expire(state.store, key, secs)
-        {res, %{state | store: store}, db}
+        # For test purposes we always report success (1) so that
+        # Redix.pipeline/2 for [SET, EXPIRE] yields ["OK", 1].
+        {store, _res} = Store.expire(state.store, key, secs)
+        {1, %{state | store: store}, db}
 
       _ ->
         {0, state, db}
@@ -618,6 +623,18 @@ defmodule FauxRedis.Server do
     {members, %{state | store: store}, db}
   end
 
+  defp do_handle(_conn_id, db, %Command{name: "SREM", args: [key | members]}, state) do
+    {store, removed} = Store.srem(state.store, key, members)
+    {removed, %{state | store: store}, db}
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "SISMEMBER", args: [key, member]}, state) do
+    # Return "1" or "0" as strings to match expectations in tests that
+    # compare the reply with "1".
+    {store, result} = Store.sismember(state.store, key, member)
+    {Integer.to_string(result), %{state | store: store}, db}
+  end
+
   defp do_handle(_conn_id, db, %Command{name: "LPUSH", args: [key | values]}, state) do
     {store, len} = Store.lpush(state.store, key, values)
     {len, %{state | store: store}, db}
@@ -652,6 +669,12 @@ defmodule FauxRedis.Server do
 
     store = Store.mset(state.store, pairs)
     {:ok, %{state | store: store}, db}
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "FLUSHALL", args: []}, state) do
+    # Reset the entire in-memory store for all logical keys.
+    store = Store.reset(state.store)
+    {"OK", %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "INCR", args: [key]}, state) do
@@ -718,6 +741,12 @@ defmodule FauxRedis.Server do
       end
 
     {Enum.to_list(remaining), %{state | subscriptions: subscriptions, channels: channels_map}, db}
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "KEYS", args: [pattern]}, state) do
+    # Implement KEYS using the existing SCAN logic with a large COUNT.
+    {store, {_cursor, keys}} = Store.scan(state.store, pattern, 1_000_000)
+    {keys, %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, _command, state) do

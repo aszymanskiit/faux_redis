@@ -166,6 +166,48 @@ defmodule FauxRedis.Store do
     end
   end
 
+  @spec srem(t(), binary(), [binary()]) :: {t(), non_neg_integer()}
+  def srem(store, key, members) do
+    store = purge_expired(store)
+
+    case Map.get(store.kv, key) do
+      {:set, set} ->
+        {new_set, removed} =
+          Enum.reduce(members, {set, 0}, fn member, {acc_set, acc_removed} ->
+            if MapSet.member?(acc_set, member) do
+              {MapSet.delete(acc_set, member), acc_removed + 1}
+            else
+              {acc_set, acc_removed}
+            end
+          end)
+
+        {kv, ttl} =
+          if MapSet.size(new_set) == 0 do
+            {Map.delete(store.kv, key), Map.delete(store.ttl, key)}
+          else
+            {Map.put(store.kv, key, {:set, new_set}), store.ttl}
+          end
+
+        {%{store | kv: kv, ttl: ttl}, removed}
+
+      _ ->
+        {store, 0}
+    end
+  end
+
+  @spec sismember(t(), binary(), binary()) :: {t(), 0 | 1}
+  def sismember(store, key, member) do
+    store = purge_expired(store)
+
+    case Map.get(store.kv, key) do
+      {:set, set} ->
+        {store, if(MapSet.member?(set, member), do: 1, else: 0)}
+
+      _ ->
+        {store, 0}
+    end
+  end
+
   @spec scan(t(), binary(), non_neg_integer()) :: {t(), {binary(), [binary()]}}
   def scan(store, _pattern, count) when count <= 0 do
     {store, {"0", []}}
