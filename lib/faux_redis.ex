@@ -11,6 +11,7 @@ defmodule FauxRedis do
     * `calls/1` – fetch the history of executed commands
     * `reset!/1` – reset server state between tests
     * `port/1` – get the TCP port the server is listening on
+    * `address/1` – `{host, port}` tuple for wiring external clients (host is `"127.0.0.1"` unless you only need the port)
     * `stop/1` – stop the server
 
   See the project README for more detailed examples.

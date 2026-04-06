@@ -18,7 +18,7 @@ defmodule FauxRedis.MockRule do
           | {:command, FauxRedis.command_name(), [binary() | :any | Regex.t()]}
           | {:fn, (Command.t() -> boolean())}
 
-  @typedoc "Response specification; see `FauxRedis.response_spec/0`."
+  @typedoc "Response specification; see `t:FauxRedis.response_spec`."
   @type response_spec :: FauxRedis.response_spec()
 
   @typedoc """

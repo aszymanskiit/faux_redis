@@ -27,14 +27,15 @@ jobs:
       - name: Run tests
         run: mix test
 
+      # Package tarball in prod (no ex_doc). Docs need ex_doc → separate step in :dev.
       - name: Publish package to Hex
         env:
           MIX_ENV: prod
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: mix hex.publish --yes
+        run: mix hex.publish package --yes
 
       - name: Publish docs to Hex
         env:
-          MIX_ENV: prod
+          MIX_ENV: dev
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: mix hex.publish docs --yes
