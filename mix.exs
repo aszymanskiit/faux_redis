@@ -2,7 +2,7 @@ defmodule FauxRedis.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/aszymanskiit/faux_redis"
-  @version "0.1.0"
+  @version "1.0.0"
 
   def project do
     [
@@ -15,6 +15,7 @@ defmodule FauxRedis.MixProject do
       dialyzer: dialyzer(),
       elixirc_paths: elixirc_paths(Mix.env()),
       source_url: @source_url,
+      docs: docs(),
       package: package(),
       description:
         "Controllable fake Redis server for integration testing (ejabberd/XMPP-friendly)",
@@ -33,14 +34,14 @@ defmodule FauxRedis.MixProject do
     ]
   end
 
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
     [
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      # :prod so `MIX_ENV=prod mix hex.publish docs` and CI release jobs can run `mix docs`
+      {:ex_doc, "~> 0.34", only: [:dev, :prod], runtime: false},
       {:excoveralls, "~> 0.18", only: :test, runtime: false}
     ]
   end
@@ -48,7 +49,15 @@ defmodule FauxRedis.MixProject do
   defp dialyzer do
     [
       plt_add_deps: false,
+      plt_add_apps: [:ex_unit],
       ignore_warnings: "dialyzer.ignore-warnings"
+    ]
+  end
+
+  defp docs do
+    [
+      main: "FauxRedis",
+      extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 
@@ -56,7 +65,8 @@ defmodule FauxRedis.MixProject do
     [
       maintainers: ["aszymanskiit"],
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url}
+      links: %{"GitHub" => @source_url},
+      files: ~w(lib config mix.exs README.md LICENSE CHANGELOG.md)
     ]
   end
 end

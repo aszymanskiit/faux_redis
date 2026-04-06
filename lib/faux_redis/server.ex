@@ -513,7 +513,7 @@ defmodule FauxRedis.Server do
     {deleted, %{state | store: store}, db}
   end
 
-  defp do_handle(_conn_id, db, %Command{name: "SCAN", args: [cursor | rest]}, state) do
+  defp do_handle(_conn_id, db, %Command{name: "SCAN", args: [_cursor | rest]}, state) do
     # For the purposes of FauxRedis we implement a simplified SCAN:
     #  * we ignore the incoming cursor and always return a full, single page
     #  * we respect a minimal subset of options used in our tests:
@@ -522,13 +522,13 @@ defmodule FauxRedis.Server do
     count = extract_scan_count(rest) || 10
 
     {store, {next_cursor, keys}} = Store.scan(state.store, pattern, count)
-    { [next_cursor, keys], %{state | store: store}, db}
+    {[next_cursor, keys], %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "SSCAN", args: [key, cursor | _rest]}, state) do
     # returned member list; match that behaviour in a simplified form.
     {store, {next_cursor, members}} = Store.sscan(state.store, key, cursor, 10)
-    { [next_cursor, members], %{state | store: store}, db}
+    {[next_cursor, members], %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "EXISTS", args: keys}, state) do
@@ -777,15 +777,18 @@ defmodule FauxRedis.Server do
       chunks ->
         chunks
         |> Enum.find_value(fn
-          ["COUNT", n] ->
-            case Integer.parse(n) do
-              {int, ""} when int > 0 -> int
-              _ -> nil
-            end
-
-          _ ->
-            nil
+          ["COUNT", n] -> parse_positive_count(n)
+          _ -> nil
         end)
     end
   end
+
+  defp parse_positive_count(n) when is_binary(n) do
+    case Integer.parse(n) do
+      {int, ""} when int > 0 -> int
+      _ -> nil
+    end
+  end
+
+  defp parse_positive_count(_), do: nil
 end

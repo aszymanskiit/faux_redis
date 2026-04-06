@@ -1,5 +1,7 @@
 # FauxRedis
 
+[![CI](https://github.com/aszymanskiit/faux_redis/actions/workflows/ci.yml/badge.svg)](https://github.com/aszymanskiit/faux_redis/actions/workflows/ci.yml)
+
 A controllable, Redis-compatible dummy server implemented in Elixir/OTP, designed
 specifically for **integration testing**.
 
@@ -23,14 +25,14 @@ integration tests. Suggested GitHub repo: `faux_redis` (slug: `faux-redis`).
 - **Supports multiple simultaneous connections and pipelining.**
 - **Extensible command dispatcher**, with built-in support for:
   - `PING`, `ECHO`, `AUTH`, `HELLO`, `SELECT`, `QUIT`, `INFO`, `CLIENT`, `COMMAND`
-  - `GET`, `SET`, `DEL`, `EXISTS`, `EXPIRE`, `TTL`
+  - `GET`, `SET`, `DEL`, `EXISTS`, `EXPIRE`, `TTL`, `KEYS`, `SCAN`, `FLUSHALL`
   - `HGET`, `HSET`, `HGETALL`, `HMGET`, `HMSET`
-  - `SADD`, `SMEMBERS`
+  - `SADD`, `SMEMBERS`, `SREM`, `SISMEMBER`, `SSCAN`
   - `LPUSH`, `RPUSH`, `LPOP`, `RPOP`
   - `MGET`, `MSET`, `INCR`, `DECR`
   - `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE` (simplified)
 - **Mock/stub engine**:
-  - Match by command name, arguments, regex, call number or connection id.
+  - Match by command name, arguments, regex, custom predicate (`{:fn, fun}`), or connection id.
   - Define:
     - constant responses
     - callback functions (`{:fun, fn command -> response end}`)
@@ -51,7 +53,7 @@ Add to your `mix.exs` dependencies.
 ```elixir
 def deps do
   [
-    {:faux_redis, "~> 0.1.0", only: :test}
+    {:faux_redis, "~> 1.0", only: :test}
   ]
 end
 ```
@@ -101,7 +103,9 @@ end
 ### Using the ExUnit helper
 
 The library ships with `FauxRedis.Case`, which starts an isolated server per
-test and injects the server and port into the test context.
+test and injects `redis_server` and `redis_port` into the test context. It also
+imports convenience `stub/3` and `expect/3` that take the context map as the first
+argument (they delegate to `FauxRedis.stub/3` / `FauxRedis.expect/3`).
 
 ```elixir
 defmodule MyApp.RedisIntegrationTest do
@@ -124,6 +128,11 @@ defmodule MyApp.RedisIntegrationTest do
 
     :gen_tcp.close(socket)
   end
+
+  test "using context helpers", %{redis_port: port} = ctx do
+    {:ok, _rule} = stub(ctx, :ping, "PONG")
+    # ...
+  end
 end
 ```
 
@@ -132,12 +141,14 @@ end
 The public API lives in the `FauxRedis` module:
 
 - `start_link/1`, `child_spec/1`
-- `stub/2` (options: `matcher`, `respond`, `conn_id`/`conn_ids`, `max_calls`), `stub/3` (convenience form)
+- `stub/2` (keyword list: `matcher`, `respond`, `conn_id`/`conn_ids`, `max_calls`) and `stub/3` (short form)
 - `expect/3`
 - `calls/1`
 - `reset!/1`
-- `port/1`, `address/1`
+- `port/1`, `address/1` (host is always `"127.0.0.1"` in the returned tuple; bind address is set via `:ip` in `start_link/1`)
 - `stop/1`
+
+Low-level RESP helpers: `FauxRedis.RESP` (`encode/1`, `decode/1`, `decode_exactly/1`, …) for building or parsing wire payloads in tests.
 
 ### Stubbing a single command
 
@@ -256,6 +267,7 @@ in a single test suite** to simulate multiple Redis backends if necessary.
 ## Architectural overview
 
 - `FauxRedis.Application` – starts a `Registry` for optional server naming.
+- `FauxRedis.Command` – parsed command struct (name, args, connection id, DB, …).
 - `FauxRedis.Server` – GenServer owning:
   - TCP listener
   - connection registry
@@ -275,7 +287,7 @@ in a single test suite** to simulate multiple Redis backends if necessary.
 
 FauxRedis is **not** a full Redis implementation. Notable limitations:
 
-- Only a subset of commands is implemented.
+- Only a subset of commands is implemented; behaviour of `SCAN`, `KEYS`, `SSCAN`, etc. follows this implementation, not every edge case of Redis.
 - Pub/sub semantics are simplified:
   - `SUBSCRIBE`/`UNSUBSCRIBE` do not switch the connection into a dedicated
     pub/sub mode; they manage an internal subscription table and return simple
@@ -288,27 +300,6 @@ FauxRedis is **not** a full Redis implementation. Notable limitations:
 If you need more real-world behaviour, consider using a real Redis instance for
 system tests and FauxRedis for **fine-grained, deterministic integration
 tests** and fault injection.
-
-## Publishing to Hex.pm
-
-To publish a new version:
-
-1. Update `@version` in `mix.exs`.
-2. Update `CHANGELOG.md`.
-3. Ensure tests pass:
-
-   ```bash
-   mix deps.get
-   mix test
-   ```
-
-4. Build and publish:
-
-   ```bash
-   MIX_ENV=prod mix hex.publish
-   ```
-
-You may want to run `mix hex.build` first to inspect the package.
 
 ## Running locally
 

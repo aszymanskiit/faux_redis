@@ -172,26 +172,28 @@ defmodule FauxRedis.Store do
 
     case Map.get(store.kv, key) do
       {:set, set} ->
-        {new_set, removed} =
-          Enum.reduce(members, {set, 0}, fn member, {acc_set, acc_removed} ->
-            if MapSet.member?(acc_set, member) do
-              {MapSet.delete(acc_set, member), acc_removed + 1}
-            else
-              {acc_set, acc_removed}
-            end
-          end)
-
-        {kv, ttl} =
-          if MapSet.size(new_set) == 0 do
-            {Map.delete(store.kv, key), Map.delete(store.ttl, key)}
-          else
-            {Map.put(store.kv, key, {:set, new_set}), store.ttl}
-          end
-
+        {new_set, removed} = Enum.reduce(members, {set, 0}, &srem_step/2)
+        {kv, ttl} = srem_update_kv_ttl(store, key, new_set)
         {%{store | kv: kv, ttl: ttl}, removed}
 
       _ ->
         {store, 0}
+    end
+  end
+
+  defp srem_step(member, {acc_set, acc_removed}) do
+    if MapSet.member?(acc_set, member) do
+      {MapSet.delete(acc_set, member), acc_removed + 1}
+    else
+      {acc_set, acc_removed}
+    end
+  end
+
+  defp srem_update_kv_ttl(store, key, new_set) do
+    if MapSet.size(new_set) == 0 do
+      {Map.delete(store.kv, key), Map.delete(store.ttl, key)}
+    else
+      {Map.put(store.kv, key, {:set, new_set}), store.ttl}
     end
   end
 
@@ -371,7 +373,7 @@ defmodule FauxRedis.Store do
 
   # Simple pattern matcher for SCAN-style glob patterns limited to what
   # TemporarySubscriptions/ejabberd modules actually use (e.g. "*@*").
-  defp match_pattern?(key, "*"), do: true
+  defp match_pattern?(_key, "*"), do: true
 
   defp match_pattern?(key, pattern) when is_binary(key) and is_binary(pattern) do
     case String.split(pattern, "*") do

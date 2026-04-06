@@ -5,8 +5,7 @@ defmodule FauxRedis.ServerIntegrationTest do
   alias FauxRedis.RESP
 
   defp connect(port) do
-    {:ok, socket} =
-      :gen_tcp.connect(~c"localhost", port, [:binary, packet: :raw, active: false])
+    {:ok, socket} = :gen_tcp.connect(~c"localhost", port, [:binary, packet: :raw, active: false])
 
     socket
   end
@@ -107,8 +106,10 @@ defmodule FauxRedis.ServerIntegrationTest do
     :ok = :gen_tcp.send(socket, payload)
     responses = collect_n_responses(socket, 5, <<>>, 5_000)
     assert length(responses) == 5
-    # SET/GET use local ETS; INCR uses Server store, so "a" starts at 0 there → INCR returns 1
-    assert [1, "1", "2"] == Enum.drop(responses, 2)
+
+    # SET stores string values; INCR parses the existing string as an integer (1) and increments → 2.
+    # GET returns bulk strings, including integer-backed keys as decimal strings.
+    assert [2, "2", "2"] == Enum.drop(responses, 2)
   after
     cleanup_test_socket()
   end

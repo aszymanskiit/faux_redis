@@ -3,8 +3,7 @@ defmodule FauxRedis.MockApiTest do
 
   # Use ECHO (forwarded to server); GET/PING are handled locally in Connection and never recorded.
   test "stub with matcher and response", %{redis_server: server} do
-    {:ok, _} =
-      FauxRedis.stub(server, {:command, :echo, ["foo"]}, "bar")
+    {:ok, _} = FauxRedis.stub(server, {:command, :echo, ["foo"]}, "bar")
 
     calls_before = FauxRedis.calls(server)
     assert calls_before == []
@@ -36,8 +35,7 @@ defmodule FauxRedis.MockApiTest do
   defp start_client_and_echo(server, msg) do
     port = FauxRedis.port(server)
 
-    {:ok, socket} =
-      :gen_tcp.connect(~c"localhost", port, [:binary, packet: :raw, active: false])
+    {:ok, socket} = :gen_tcp.connect(~c"localhost", port, [:binary, packet: :raw, active: false])
 
     payload = FauxRedis.RESP.encode(["ECHO", msg]) |> IO.iodata_to_binary()
     :ok = :gen_tcp.send(socket, payload)

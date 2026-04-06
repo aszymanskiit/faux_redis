@@ -149,6 +149,7 @@ defmodule FauxRedis.Connection do
   def handle_info({:tcp, socket, data}, %{socket: socket} = state) do
     buffer = state.buffer <> data
     {buffer, state} = process_buffer(buffer, state)
+
     case :inet.setopts(socket, active: :once) do
       :ok ->
         {:noreply, %{state | buffer: buffer}}
@@ -206,8 +207,7 @@ defmodule FauxRedis.Connection do
 
             _other ->
               # For non-array inputs, respond with a protocol error.
-              payload =
-                RESP.encode({:error, "ERR Protocol error: expected array"})
+              payload = RESP.encode({:error, "ERR Protocol error: expected array"})
 
               maybe_stop_on_send_error(:gen_tcp.send(state.socket, payload))
 

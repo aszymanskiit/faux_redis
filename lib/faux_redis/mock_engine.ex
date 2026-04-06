@@ -28,7 +28,12 @@ defmodule FauxRedis.MockEngine do
     * `:mock_only` – try rules, return `{:error, \"ERR unknown command\"}` when no match
     * `:stateful_only` – ignore rules, always call `fallback.()`
   """
-  @spec apply([MockRule.t()], Command.t(), :mock_first | :mock_only | :stateful_only, (-> term())) ::
+  @spec apply(
+          [MockRule.t()],
+          Command.t(),
+          :mock_first | :mock_only | :stateful_only,
+          (-> term())
+        ) ::
           result()
   def apply(rules, _command, :stateful_only, fallback) do
     %{
