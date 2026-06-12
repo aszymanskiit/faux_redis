@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-06-12
+
+### Fixed
+
+- `SCAN` / `KEYS` `MATCH` now supports full Redis-style glob patterns (multiple
+  `*`, `?`, character classes, escapes). Fixes patterns such as `*@*` that were
+  previously ignored and returned no keys.
+
+### Added
+
+- `FauxRedis.Glob` – internal glob matcher shared by `Store.scan/3` and `KEYS`.
+- Unit and integration tests for `MATCH` patterns and `SCAN` without `MATCH`.
+
 ## [1.0.1] - 2026-04-07
 
 ### Fixed
