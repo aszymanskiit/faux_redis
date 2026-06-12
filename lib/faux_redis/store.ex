@@ -210,6 +210,24 @@ defmodule FauxRedis.Store do
     end
   end
 
+  @wrongtype "WRONGTYPE Operation against a key holding the wrong kind of value"
+
+  @spec scard(t(), binary()) :: {t(), non_neg_integer() | {:error, binary()}}
+  def scard(store, key) do
+    store = purge_expired(store)
+
+    case Map.get(store.kv, key) do
+      nil ->
+        {store, 0}
+
+      {:set, set} ->
+        {store, MapSet.size(set)}
+
+      _ ->
+        {store, {:error, @wrongtype}}
+    end
+  end
+
   @spec scan(t(), binary(), non_neg_integer()) :: {t(), {binary(), [binary()]}}
   def scan(store, _pattern, count) when count <= 0 do
     {store, {"0", []}}

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-06-12
+
+### Added
+
+- `SCARD` – set cardinality (`Store.scard/2` and server handler).
+- Unit and integration tests for `SCARD` (including `WRONGTYPE` on non-set keys).
+- README section documenting `SCARD` behaviour and limitations.
+
 ## [1.0.2] - 2026-06-12
 
 ### Fixed
