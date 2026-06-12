@@ -634,6 +634,15 @@ defmodule FauxRedis.Server do
     {Integer.to_string(result), %{state | store: store}, db}
   end
 
+  defp do_handle(_conn_id, db, %Command{name: "SCARD", args: [key]}, state) do
+    {store, result} = Store.scard(state.store, key)
+
+    case result do
+      {:error, msg} -> {{:error, msg}, %{state | store: store}, db}
+      count -> {count, %{state | store: store}, db}
+    end
+  end
+
   defp do_handle(_conn_id, db, %Command{name: "LPUSH", args: [key | values]}, state) do
     {store, len} = Store.lpush(state.store, key, values)
     {len, %{state | store: store}, db}

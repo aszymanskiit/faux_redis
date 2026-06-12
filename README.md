@@ -27,7 +27,7 @@ integration tests. Suggested GitHub repo: `faux_redis` (slug: `faux-redis`).
   - `PING`, `ECHO`, `AUTH`, `HELLO`, `SELECT`, `QUIT`, `INFO`, `CLIENT`, `COMMAND`
   - `GET`, `SET`, `DEL`, `EXISTS`, `EXPIRE`, `TTL`, `KEYS`, `SCAN`, `FLUSHALL`
   - `HGET`, `HSET`, `HGETALL`, `HMGET`, `HMSET`
-  - `SADD`, `SMEMBERS`, `SREM`, `SISMEMBER`, `SSCAN`
+  - `SADD`, `SMEMBERS`, `SREM`, `SISMEMBER`, `SCARD`, `SSCAN`
   - `LPUSH`, `RPUSH`, `LPOP`, `RPOP`
   - `MGET`, `MSET`, `INCR`, `DECR`
   - `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE` (simplified)
@@ -295,6 +295,21 @@ FauxRedis applies `MATCH` filtering before `COUNT` limits the returned batch.
 For tests, the cursor is always returned as `"0"` with the full result set in one
 reply — enough for clients that loop until cursor zero, but not a faithful
 reproduction of Redis cursor-based iteration over large keyspaces.
+
+## Set cardinality (`SCARD`)
+
+`SCARD key` returns the number of members in a set:
+
+```elixir
+["SADD", "online", "alice", "bob"]
+["SCARD", "online"]   # => 2
+```
+
+Redis-compatible behaviour:
+
+- missing key → integer `0` (treated as an empty set)
+- wrong key type → `WRONGTYPE` error (unlike `SISMEMBER`, which returns `0` for non-sets)
+- after `SREM` removes the last member, the key is deleted and `SCARD` returns `0`
 
 ## Architectural overview
 

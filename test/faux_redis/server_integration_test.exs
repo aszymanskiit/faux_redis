@@ -207,6 +207,58 @@ defmodule FauxRedis.ServerIntegrationTest do
     cleanup_test_socket()
   end
 
+  test "SCARD returns set cardinality", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SADD", "set:key", "a", "b", "c"]])
+    assert [3] = send_recv(socket, [["SCARD", "set:key"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "SCARD returns 0 for a missing key", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+    assert [0] = send_recv(socket, [["SCARD", "no-such-key"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "SCARD returns 0 after all members are removed", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SADD", "set:key", "only"]])
+    _ = send_recv(socket, [["SREM", "set:key", "only"]])
+    assert [0] = send_recv(socket, [["SCARD", "set:key"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "SCARD returns WRONGTYPE for a non-set key", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SET", "str:key", "value"]])
+    [error] = send_recv(socket, [["SCARD", "str:key"]])
+
+    assert error ==
+             {:error, "WRONGTYPE Operation against a key holding the wrong kind of value"}
+  after
+    cleanup_test_socket()
+  end
+
+  test "set commands still work alongside SCARD", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    assert [3] = send_recv(socket, [["SADD", "set:key", "a", "b", "c"]])
+    assert [3] = send_recv(socket, [["SCARD", "set:key"]])
+    assert ["1"] = send_recv(socket, [["SISMEMBER", "set:key", "b"]])
+    [members] = send_recv(socket, [["SMEMBERS", "set:key"]])
+    assert Enum.sort(members) == ["a", "b", "c"]
+    assert [1] = send_recv(socket, [["SREM", "set:key", "b"]])
+    assert [2] = send_recv(socket, [["SCARD", "set:key"]])
+  after
+    cleanup_test_socket()
+  end
+
   test "SCAN with MATCH and COUNT returns matching keys", %{redis_port: port} do
     socket = connect_and_put_socket(port)
 
