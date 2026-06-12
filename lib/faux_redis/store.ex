@@ -221,7 +221,7 @@ defmodule FauxRedis.Store do
     keys =
       store.kv
       |> Map.keys()
-      |> Enum.filter(&match_pattern?(&1, pattern))
+      |> Enum.filter(&FauxRedis.Glob.match?(&1, pattern))
       |> Enum.sort()
 
     {batch, _rest} = Enum.split(keys, count)
@@ -370,20 +370,6 @@ defmodule FauxRedis.Store do
 
   @spec reset(t()) :: t()
   def reset(_store), do: %__MODULE__{}
-
-  # Simple pattern matcher for SCAN-style glob patterns limited to what
-  # TemporarySubscriptions/ejabberd modules actually use (e.g. "*@*").
-  defp match_pattern?(_key, "*"), do: true
-
-  defp match_pattern?(key, pattern) when is_binary(key) and is_binary(pattern) do
-    case String.split(pattern, "*") do
-      ["", ""] -> String.contains?(key, "")
-      [prefix, ""] -> String.starts_with?(key, prefix)
-      ["", suffix] -> String.ends_with?(key, suffix)
-      [prefix, suffix] -> String.starts_with?(key, prefix) and String.ends_with?(key, suffix)
-      _ -> key == pattern
-    end
-  end
 
   # Expiration handling
 

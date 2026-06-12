@@ -222,4 +222,46 @@ defmodule FauxRedis.ServerIntegrationTest do
   after
     cleanup_test_socket()
   end
+
+  test "SCAN 0 MATCH *@* returns only keys containing @", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SET", "alice@host", "1"]])
+    _ = send_recv(socket, [["SET", "bob@host", "2"]])
+    _ = send_recv(socket, [["SET", "no-at-sign", "3"]])
+
+    [[cursor, keys]] = send_recv(socket, [["SCAN", "0", "MATCH", "*@*"]])
+
+    assert cursor == "0"
+    assert Enum.sort(keys) == ["alice@host", "bob@host"]
+  after
+    cleanup_test_socket()
+  end
+
+  test "SCAN without MATCH still returns all keys", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SET", "alpha", "1"]])
+    _ = send_recv(socket, [["SET", "beta", "2"]])
+
+    [[cursor, keys]] = send_recv(socket, [["SCAN", "0"]])
+
+    assert cursor == "0"
+    assert Enum.sort(keys) == ["alpha", "beta"]
+  after
+    cleanup_test_socket()
+  end
+
+  test "KEYS uses the same glob matching as SCAN MATCH", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SET", "user@domain", "1"]])
+    _ = send_recv(socket, [["SET", "guest", "2"]])
+
+    [keys] = send_recv(socket, [["KEYS", "*@*"]])
+
+    assert Enum.sort(keys) == ["user@domain"]
+  after
+    cleanup_test_socket()
+  end
 end

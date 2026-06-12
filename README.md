@@ -264,6 +264,38 @@ ejabberd and other XMPP systems:
 Because the server is a normal OTP process, you can run **multiple instances
 in a single test suite** to simulate multiple Redis backends if necessary.
 
+## SCAN and KEYS pattern matching
+
+`SCAN cursor [MATCH pattern] [COUNT count]` and `KEYS pattern` filter keys using
+Redis glob patterns:
+
+| Pattern | Meaning |
+|---------|---------|
+| `*` | any number of characters |
+| `?` | exactly one character |
+| `[aeiou]` | one character from the set |
+| `[^aeiou]` | one character not in the set |
+| `[a-z]` | character range inside a class |
+| `\?`, `\*`, … | match `?`, `*` literally |
+
+Examples over TCP (RESP arrays):
+
+```elixir
+# Keys whose name contains @ (typical JID-style lookups)
+["SCAN", "0", "MATCH", "*@*"]
+
+# Keys ending with a domain suffix
+["SCAN", "0", "MATCH", "*@example.com", "COUNT", "100"]
+
+# Same glob rules for KEYS
+["KEYS", "session:*"]
+```
+
+FauxRedis applies `MATCH` filtering before `COUNT` limits the returned batch.
+For tests, the cursor is always returned as `"0"` with the full result set in one
+reply — enough for clients that loop until cursor zero, but not a faithful
+reproduction of Redis cursor-based iteration over large keyspaces.
+
 ## Architectural overview
 
 - `FauxRedis.Application` – starts a `Registry` for optional server naming.
@@ -287,7 +319,8 @@ in a single test suite** to simulate multiple Redis backends if necessary.
 
 FauxRedis is **not** a full Redis implementation. Notable limitations:
 
-- Only a subset of commands is implemented; behaviour of `SCAN`, `KEYS`, `SSCAN`, etc. follows this implementation, not every edge case of Redis.
+- Only a subset of commands is implemented; behaviour of `SSCAN`, pub/sub, etc. follows this implementation, not every edge case of Redis.
+- `SCAN` / `KEYS` `MATCH` patterns use Redis-style glob syntax (`*`, `?`, `[...]`, `\` escapes). FauxRedis returns all matching keys in a single page with cursor `0` (no incremental cursor iteration like production Redis).
 - Pub/sub semantics are simplified:
   - `SUBSCRIBE`/`UNSUBSCRIBE` do not switch the connection into a dedicated
     pub/sub mode; they manage an internal subscription table and return simple

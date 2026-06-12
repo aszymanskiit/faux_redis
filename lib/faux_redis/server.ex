@@ -514,10 +514,9 @@ defmodule FauxRedis.Server do
   end
 
   defp do_handle(_conn_id, db, %Command{name: "SCAN", args: [_cursor | rest]}, state) do
-    # For the purposes of FauxRedis we implement a simplified SCAN:
-    #  * we ignore the incoming cursor and always return a full, single page
-    #  * we respect a minimal subset of options used in our tests:
-    #      SCAN cursor MATCH pattern COUNT n
+    # Simplified SCAN for tests: ignore the incoming cursor and return one page
+    # with cursor "0". Supports SCAN cursor [MATCH pattern] [COUNT n] using
+    # Redis-style glob patterns (see FauxRedis.Glob).
     pattern = extract_scan_match(rest) || "*"
     count = extract_scan_count(rest) || 10
 
