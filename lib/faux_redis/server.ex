@@ -11,7 +11,7 @@ defmodule FauxRedis.Server do
   use GenServer
 
   require Logger
-  alias FauxRedis.{Command, MockEngine, MockRule, Store}
+  alias FauxRedis.{Command, MockEngine, MockRule, Script, Store}
 
   @typedoc "Internal server mode."
   @type mode :: :mock_first | :stateful_only | :mock_only
@@ -32,6 +32,7 @@ defmodule FauxRedis.Server do
           authed: MapSet.t(non_neg_integer()),
           subscriptions: %{pid() => MapSet.t(binary())},
           channels: %{binary() => MapSet.t(pid())},
+          scripts: %{binary() => binary()},
           ets_kv: term()
         }
 
@@ -49,6 +50,7 @@ defmodule FauxRedis.Server do
             authed: MapSet.new(),
             subscriptions: %{},
             channels: %{},
+            scripts: %{},
             ets_kv: nil
 
   ## Public API
@@ -222,7 +224,8 @@ defmodule FauxRedis.Server do
         calls: [],
         authed: MapSet.new(),
         subscriptions: %{},
-        channels: %{}
+        channels: %{},
+        scripts: %{}
     }
 
     {:reply, :ok, new_state}
@@ -643,6 +646,73 @@ defmodule FauxRedis.Server do
     end
   end
 
+  defp do_handle(_conn_id, db, %Command{name: "ZADD", args: [key | rest]}, state) do
+    case parse_zadd_args(rest) do
+      {:ok, opts, pairs} ->
+        {store, result} = Store.zadd(state.store, key, pairs, opts)
+        {result, %{state | store: store}, db}
+
+      error ->
+        {error, state, db}
+    end
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "ZRANGE", args: [key, start, stop | opts]}, state) do
+    with {:ok, start} <- parse_integer_arg(start),
+         {:ok, stop} <- parse_integer_arg(stop),
+         {:ok, rev?, withscores?} <- parse_zrange_opts(opts, false, false) do
+      {store, result} = Store.zrange(state.store, key, start, stop, rev?)
+      {zrange_reply(result, withscores?), %{state | store: store}, db}
+    else
+      error -> {error, state, db}
+    end
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "ZSCORE", args: [key, member]}, state) do
+    {store, result} = Store.zscore(state.store, key, member)
+
+    case result do
+      {:error, msg} -> {{:error, msg}, %{state | store: store}, db}
+      nil -> {nil, %{state | store: store}, db}
+      score -> {format_score(score), %{state | store: store}, db}
+    end
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "ZREM", args: [key | [_ | _] = members]}, state) do
+    {store, result} = Store.zrem(state.store, key, members)
+    {result, %{state | store: store}, db}
+  end
+
+  defp do_handle(conn_id, db, %Command{name: "EVAL", args: [script, numkeys | rest]}, state) do
+    state = %{state | scripts: Map.put(state.scripts, Script.sha1(script), script)}
+    run_script(conn_id, db, script, numkeys, rest, state)
+  end
+
+  defp do_handle(conn_id, db, %Command{name: "EVALSHA", args: [sha, numkeys | rest]}, state) do
+    case Map.fetch(state.scripts, String.downcase(sha)) do
+      {:ok, script} -> run_script(conn_id, db, script, numkeys, rest, state)
+      :error -> {{:error, "NOSCRIPT No matching script. Please use EVAL."}, state, db}
+    end
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "SCRIPT", args: [subcommand | args]}, state) do
+    case {String.upcase(subcommand), args} do
+      {"LOAD", [script]} ->
+        sha = Script.sha1(script)
+        {sha, %{state | scripts: Map.put(state.scripts, sha, script)}, db}
+
+      {"EXISTS", [_ | _] = shas} ->
+        {Enum.map(shas, &if(Map.has_key?(state.scripts, String.downcase(&1)), do: 1, else: 0)),
+         state, db}
+
+      {"FLUSH", _mode} ->
+        {:ok, %{state | scripts: %{}}, db}
+
+      _ ->
+        {{:error, "ERR unknown subcommand or wrong number of arguments for 'SCRIPT'"}, state, db}
+    end
+  end
+
   defp do_handle(_conn_id, db, %Command{name: "LPUSH", args: [key | values]}, state) do
     {store, len} = Store.lpush(state.store, key, values)
     {len, %{state | store: store}, db}
@@ -799,4 +869,124 @@ defmodule FauxRedis.Server do
   end
 
   defp parse_positive_count(_), do: nil
+
+  # Helpers for scripting
+
+  @script_forbidden ~w(EVAL EVALSHA SCRIPT SUBSCRIBE UNSUBSCRIBE)
+
+  defp run_script(conn_id, db, script, numkeys, rest, state) do
+    case parse_numkeys(numkeys, length(rest)) do
+      {:ok, n} ->
+        {keys, args} = Enum.split(rest, n)
+        call_fun = &script_call(conn_id, db, &1, &2)
+        {reply, state} = Script.eval(script, keys, args, state, call_fun)
+        {reply, state, db}
+
+      error ->
+        {error, state, db}
+    end
+  end
+
+  defp script_call(conn_id, db, argv, state) do
+    command = Command.from_array(argv, conn_id, db)
+
+    if command.name in @script_forbidden do
+      {{:error, "ERR This Redis command is not allowed from script"}, state}
+    else
+      {reply, state, _db} = do_handle(conn_id, db, command, state)
+      {reply, state}
+    end
+  end
+
+  defp parse_numkeys(numkeys, argc) do
+    case Integer.parse(numkeys) do
+      {n, ""} when n < 0 -> {:error, "ERR Number of keys can't be negative"}
+      {n, ""} when n > argc -> {:error, "ERR Number of keys can't be greater than number of args"}
+      {n, ""} -> {:ok, n}
+      _ -> {:error, "ERR value is not an integer or out of range"}
+    end
+  end
+
+  # Helpers for sorted set commands
+
+  @zadd_flags %{"NX" => :nx, "XX" => :xx, "GT" => :gt, "LT" => :lt, "CH" => :ch}
+
+  defp parse_zadd_args(args) do
+    {flags, rest} = Enum.split_while(args, &Map.has_key?(@zadd_flags, String.upcase(&1)))
+    opts = Map.new(flags, &{Map.fetch!(@zadd_flags, String.upcase(&1)), true})
+
+    with :ok <- validate_zadd_opts(opts),
+         {:ok, pairs} <- parse_score_pairs(rest) do
+      {:ok, opts, pairs}
+    end
+  end
+
+  defp validate_zadd_opts(%{nx: true, xx: true}),
+    do: {:error, "ERR XX and NX options at the same time are not compatible"}
+
+  defp validate_zadd_opts(opts) do
+    if Enum.count([:nx, :gt, :lt], &Map.get(opts, &1, false)) > 1 do
+      {:error, "ERR GT, LT, and/or NX options at the same time are not compatible"}
+    else
+      :ok
+    end
+  end
+
+  defp parse_score_pairs([]), do: {:error, "ERR syntax error"}
+
+  defp parse_score_pairs(args) when rem(length(args), 2) == 1, do: {:error, "ERR syntax error"}
+
+  defp parse_score_pairs(args) do
+    args
+    |> Enum.chunk_every(2)
+    |> Enum.reduce_while({:ok, []}, &parse_score_pair/2)
+    |> case do
+      {:ok, pairs} -> {:ok, Enum.reverse(pairs)}
+      error -> error
+    end
+  end
+
+  defp parse_score_pair([score, member], {:ok, acc}) do
+    case parse_score(score) do
+      {:ok, s} -> {:cont, {:ok, [{s, member} | acc]}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp parse_score(bin) do
+    case Float.parse(bin) do
+      {score, ""} -> {:ok, score}
+      _ -> {:error, "ERR value is not a valid float"}
+    end
+  end
+
+  defp parse_integer_arg(bin) do
+    case Integer.parse(bin) do
+      {int, ""} -> {:ok, int}
+      _ -> {:error, "ERR value is not an integer or out of range"}
+    end
+  end
+
+  defp parse_zrange_opts([], rev?, withscores?), do: {:ok, rev?, withscores?}
+
+  defp parse_zrange_opts([opt | rest], rev?, withscores?) do
+    case String.upcase(opt) do
+      "REV" -> parse_zrange_opts(rest, true, withscores?)
+      "WITHSCORES" -> parse_zrange_opts(rest, rev?, true)
+      _ -> {:error, "ERR syntax error"}
+    end
+  end
+
+  defp zrange_reply({:error, _} = error, _withscores?), do: error
+
+  defp zrange_reply(entries, true),
+    do: Enum.flat_map(entries, fn {member, score} -> [member, format_score(score)] end)
+
+  defp zrange_reply(entries, false), do: Enum.map(entries, fn {member, _score} -> member end)
+
+  # Redis prints integral scores without a fractional part ("1", not "1.0").
+  defp format_score(score) when score == trunc(score) and abs(score) < 1.0e17,
+    do: Integer.to_string(trunc(score))
+
+  defp format_score(score), do: Float.to_string(score)
 end

@@ -2,7 +2,7 @@ defmodule FauxRedis.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/aszymanskiit/faux_redis"
-  @version "1.0.3"
+  @version "1.1.0"
 
   def project do
     [
@@ -29,7 +29,7 @@ defmodule FauxRedis.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:logger, :crypto],
       mod: {FauxRedis.Application, []}
     ]
   end
@@ -38,6 +38,7 @@ defmodule FauxRedis.MixProject do
 
   defp deps do
     [
+      {:luerl, "~> 1.2"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
@@ -48,7 +49,7 @@ defmodule FauxRedis.MixProject do
   defp dialyzer do
     [
       plt_add_deps: false,
-      plt_add_apps: [:ex_unit],
+      plt_add_apps: [:ex_unit, :crypto, :luerl],
       ignore_warnings: "dialyzer.ignore-warnings"
     ]
   end
