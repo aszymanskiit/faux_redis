@@ -6,6 +6,9 @@ defmodule FauxRedis.ScriptTest do
   # Echoes the command back as a list and records it in the state.
   defp echo_call(argv, calls), do: {argv, [argv | calls]}
 
+  defp crashing_call(["BOOM" | _], _calls), do: raise("kaput")
+  defp crashing_call(argv, calls), do: echo_call(argv, calls)
+
   defp eval(script, keys \\ [], args \\ [], call_fun \\ &echo_call/2) do
     Script.eval(script, keys, args, [], call_fun)
   end
@@ -54,6 +57,32 @@ defmodule FauxRedis.ScriptTest do
 
   test "keeps writes made before a runtime error" do
     assert {{:error, _}, [["SET", "a", "1"]]} = eval("redis.call('SET', 'a', '1'); error('x')")
+  end
+
+  describe "writes are kept when" do
+    test "redis.call hits a crashing command" do
+      assert {{:error, "ERR Error running command 'BOOM': kaput"}, [["SET", "a", "1"]]} =
+               eval("redis.call('SET', 'a', '1'); redis.call('BOOM')", [], [], &crashing_call/2)
+    end
+
+    test "redis.pcall hits a crashing command and the script continues" do
+      script = "local r = redis.pcall('BOOM'); redis.call('SET', 'b', '2'); return r.err"
+
+      assert {"ERR Error running command 'BOOM': kaput", [["SET", "b", "2"]]} =
+               eval(script, [], [], &crashing_call/2)
+    end
+
+    test "the return value cannot be converted" do
+      script = "redis.call('SET', 'a', '1'); local t = {}; t[1] = t; return t"
+
+      assert {{:error, "ERR Error running script: " <> _}, [["SET", "a", "1"]]} = eval(script)
+    end
+
+    test "the error object cannot be converted" do
+      script = "redis.call('SET', 'a', '1'); local t = {}; t[1] = t; error(t)"
+
+      assert {{:error, "ERR Error running script: " <> _}, [["SET", "a", "1"]]} = eval(script)
+    end
   end
 
   test "treats scripts and arguments as UTF-8 byte strings" do

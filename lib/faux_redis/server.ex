@@ -33,6 +33,7 @@ defmodule FauxRedis.Server do
           subscriptions: %{pid() => MapSet.t(binary())},
           channels: %{binary() => MapSet.t(pid())},
           scripts: %{binary() => binary()},
+          script_timeout: timeout(),
           ets_kv: term()
         }
 
@@ -51,6 +52,7 @@ defmodule FauxRedis.Server do
             subscriptions: %{},
             channels: %{},
             scripts: %{},
+            script_timeout: 5_000,
             ets_kv: nil
 
   ## Public API
@@ -64,6 +66,7 @@ defmodule FauxRedis.Server do
     * `:mode` – `:mock_first` (default), `:stateful_only`, or `:mock_only`
     * `:require_auth?` – whether AUTH is required before most commands
     * `:password` – the expected password for AUTH
+    * `:script_timeout` – max time in ms an `EVAL`/`EVALSHA` script may run (default `5_000`)
     * `:name` – optional registered name (e.g. via `Registry`)
   """
   @spec start_link(Keyword.t()) :: GenServer.on_start()
@@ -138,6 +141,7 @@ defmodule FauxRedis.Server do
 
     require_auth? = Keyword.get(opts, :require_auth?, false)
     password = Keyword.get(opts, :password)
+    script_timeout = Keyword.get(opts, :script_timeout, 5_000)
     port = Keyword.get(opts, :port, 0)
     ip = Keyword.get(opts, :ip, {127, 0, 0, 1})
 
@@ -162,6 +166,7 @@ defmodule FauxRedis.Server do
       mode: mode,
       require_auth?: require_auth?,
       password: password,
+      script_timeout: script_timeout,
       listener: listener,
       port: actual_port,
       ets_kv: ets_kv
@@ -392,7 +397,7 @@ defmodule FauxRedis.Server do
   @spec do_handle(non_neg_integer(), non_neg_integer(), Command.t(), t()) ::
           {term(), t(), non_neg_integer()}
   defp do_handle(_conn_id, db, %Command{name: "PING", args: []}, state) do
-    {"PONG", state, db}
+    {{:simple_string, "PONG"}, state, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "PING", args: [msg]}, state) do
@@ -470,7 +475,7 @@ defmodule FauxRedis.Server do
   defp do_handle(_conn_id, db, %Command{name: "INFO"}, state) do
     payload = """
     # Server
-    faux_redis:0.1.0
+    faux_redis:#{app_version()}
 
     # Clients
     connected_clients:#{map_size(state.connections)}
@@ -508,7 +513,7 @@ defmodule FauxRedis.Server do
     # Redix.pipeline/2 yields ["OK", 1] for SET+EXPIRE pipelines used
     # by TemporarySubscriptions.LastSeenTracker.
     store = Store.set(state.store, key, value)
-    {"OK", %{state | store: store}, db}
+    {:ok, %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "DEL", args: keys}, state) do
@@ -752,7 +757,7 @@ defmodule FauxRedis.Server do
   defp do_handle(_conn_id, db, %Command{name: "FLUSHALL", args: []}, state) do
     # Reset the entire in-memory store for all logical keys.
     store = Store.reset(state.store)
-    {"OK", %{state | store: store}, db}
+    {:ok, %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "INCR", args: [key]}, state) do
@@ -879,8 +884,17 @@ defmodule FauxRedis.Server do
       {:ok, n} ->
         {keys, args} = Enum.split(rest, n)
         call_fun = &script_call(conn_id, db, &1, &2)
-        {reply, state} = Script.eval(script, keys, args, state, call_fun)
-        {reply, state, db}
+        task = Task.async(fn -> Script.eval(script, keys, args, state, call_fun) end)
+
+        # The script runs on its own copy of the state, so writes made before
+        # a timeout are discarded together with the killed task.
+        case Task.yield(task, state.script_timeout) || Task.shutdown(task, :brutal_kill) do
+          {:ok, {reply, state}} ->
+            {reply, state, db}
+
+          nil ->
+            {{:error, "BUSY script timed out after #{state.script_timeout} ms"}, state, db}
+        end
 
       error ->
         {error, state, db}
@@ -958,6 +972,8 @@ defmodule FauxRedis.Server do
       {score, ""} -> {:ok, score}
       _ -> {:error, "ERR value is not a valid float"}
     end
+    rescue
+      _ -> {:error, "ERR value is not a valid float"}
   end
 
   defp parse_integer_arg(bin) do
@@ -989,4 +1005,8 @@ defmodule FauxRedis.Server do
     do: Integer.to_string(trunc(score))
 
   defp format_score(score), do: Float.to_string(score)
+
+  defp app_version() do
+    Application.spec(:faux_redis, :vsn)
+  end
 end

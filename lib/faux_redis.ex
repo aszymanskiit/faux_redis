@@ -97,6 +97,8 @@ defmodule FauxRedis do
     * `:name` – optional registered name (via `Registry.FauxRedis.ServerRegistry`)
     * `:require_auth?` – whether connections must AUTH before using the server (default: `false`)
     * `:password` – expected password for AUTH (only meaningful when `:require_auth?` is `true`)
+    * `:script_timeout` – max time in ms an `EVAL`/`EVALSHA` script may run before it is killed
+      and a `BUSY` error is returned (default: `5_000`)
   """
   @spec start_link(Keyword.t()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do

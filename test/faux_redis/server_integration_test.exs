@@ -393,6 +393,40 @@ defmodule FauxRedis.ServerIntegrationTest do
     cleanup_test_socket()
   end
 
+  test "EVAL sees status replies as {ok = ...} tables", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    assert [["OK", "PONG", "OK"]] =
+             send_recv(socket, [
+               [
+                 "EVAL",
+                 "return {redis.call('SET', KEYS[1], 'v').ok, redis.call('PING').ok, redis.call('FLUSHALL').ok}",
+                 "1",
+                 "k"
+               ]
+             ])
+
+    assert [1] =
+             send_recv(socket, [
+               ["EVAL", "return type(redis.call('SET', KEYS[1], 'v')) == 'table'", "1", "k"]
+             ])
+  after
+    cleanup_test_socket()
+  end
+
+  test "EVAL is killed after :script_timeout and the server keeps working" do
+    server = start_supervised!({FauxRedis.Server, script_timeout: 100})
+    socket = connect_and_put_socket(FauxRedis.Server.port(server))
+
+    assert [{:error, "BUSY script timed out after 100 ms"}] =
+             send_recv(socket, [["EVAL", "redis.call('SET', 'k', 'v') while true do end", "0"]])
+
+    assert ["PONG", 0] = send_recv(socket, [["PING"], ["EXISTS", "k"]])
+    assert [1] = send_recv(socket, [["EVAL", "return 1", "0"]])
+  after
+    cleanup_test_socket()
+  end
+
   test "SCRIPT LOAD, SCRIPT EXISTS and EVALSHA", %{redis_port: port} do
     socket = connect_and_put_socket(port)
     sha = "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"

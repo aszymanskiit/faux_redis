@@ -10,6 +10,11 @@ defmodule FauxRedis.Script do
   Values are converted between Redis replies and Lua following the rules of
   real Redis (nil bulk → `false`, status → `{ok = ...}`, Lua numbers →
   integers truncated towards zero, and so on).
+
+  This module does not enforce timeouts itself: `FauxRedis.Server` runs
+  `eval/5` in a separate task bounded by its `:script_timeout` option and,
+  when the time runs out, kills the task and discards the state it would
+  have returned.
   """
 
   @typedoc "Callback executing one Redis command on behalf of the script."
@@ -46,21 +51,39 @@ defmodule FauxRedis.Script do
 
   `state` is threaded through every `call_fun` invocation; the final state is
   returned alongside the script's reply (converted to a Redis reply term).
-  As in Redis, writes made before a runtime error are kept.
+
+  As in Redis, there is no rollback: writes made before a script error, a
+  failing command or an unconvertible return value are kept. Only an
+  unexpected failure of the Lua VM itself returns the original `state`
+  (the server's `:script_timeout` is the other exception: the state of a
+  killed script is discarded).
   """
   @spec eval(binary(), [binary()], [binary()], state, call_fun()) :: {term(), state}
         when state: term()
   def eval(script, keys, args, state, call_fun) do
-    lua = setup(keys, args, state, call_fun)
-
-    case :luerl.do(:binary.bin_to_list(script), lua) do
-      {:ok, [ret | _], lua} -> {to_redis(:luerl.decode(ret, lua)), server_state(lua)}
-      {:ok, [], lua} -> {nil, server_state(lua)}
+    case run(script, keys, args, state, call_fun) do
+      {:ok, rets, lua} -> {script_reply(rets, lua), server_state(lua)}
       {:lua_error, error, lua} -> {{:error, runtime_error(error, lua)}, server_state(lua)}
       {:error, errors, _warnings} -> {{:error, compile_error(errors)}, state}
+      {:crash, e} -> {{:error, "ERR Error running script: #{Exception.message(e)}"}, state}
     end
+  end
+
+  # The latest server state lives inside the Lua state, so this rescue is only
+  # a guard against luerl failures; everything after the run handles its own errors.
+  defp run(script, keys, args, state, call_fun) do
+    lua = setup(keys, args, state, call_fun)
+    :luerl.do(:binary.bin_to_list(script), lua)
   rescue
-    e -> {{:error, "ERR Error running script: #{Exception.message(e)}"}, state}
+    e -> {:crash, e}
+  end
+
+  defp script_reply([], _lua), do: nil
+
+  defp script_reply([ret | _], lua) do
+    to_redis(:luerl.decode(ret, lua))
+  rescue
+    e -> {:error, "ERR Error running script: #{Exception.message(e)}"}
   end
 
   defp setup(keys, args, state, call_fun) do
@@ -86,7 +109,7 @@ defmodule FauxRedis.Script do
         )
 
       {:ok, argv} ->
-        {reply, state} = call_fun.(argv, server_state(lua))
+        {reply, state} = run_command(call_fun, argv, server_state(lua))
         encode_reply(reply, :luerl.put_private(:server_state, state, lua))
 
       :error ->
@@ -95,6 +118,14 @@ defmodule FauxRedis.Script do
           lua
         )
     end
+  end
+
+  # luerl only catches Lua errors and the latest server state lives inside the
+  # Lua state, so a crashing command must become a Redis error reply instead.
+  defp run_command(call_fun, [name | _] = argv, state) do
+    call_fun.(argv, state)
+  rescue
+    e -> {{:error, "ERR Error running command '#{name}': #{Exception.message(e)}"}, state}
   end
 
   defp encode_reply(reply, lua) do
@@ -165,6 +196,8 @@ defmodule FauxRedis.Script do
       msg when is_binary(msg) -> "ERR user_script: #{msg}"
       other -> "ERR user_script: #{inspect(other)}"
     end
+  rescue
+    _ -> "ERR Error running script: #{inspect(message)}"
   end
 
   defp runtime_error(error, _lua) do

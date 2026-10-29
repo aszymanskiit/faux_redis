@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lua scripting: `EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT EXISTS`,
   `SCRIPT FLUSH` (`FauxRedis.Script`, built on the pure-Erlang `luerl` VM;
   `redis.call` / `redis.pcall` run against the in-memory store).
+- `:script_timeout` option (default `5_000` ms): scripts running longer are
+  killed, return a `BUSY` error and their writes are discarded.
 - New runtime dependency: `luerl ~> 1.2`.
 - Unit and integration tests for sorted set commands and Lua scripting.
 - README sections documenting sorted set and scripting behaviour and limitations.

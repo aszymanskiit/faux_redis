@@ -73,7 +73,7 @@ provided ExUnit case template.
 
 ### Starting manually inside a test
 
-Main options for `start_link/1`: `:port` (default `0` = random), `:mode` (`:mock_first`, `:stateful_only`, `:mock_only`), `:name` (registered name), `:ip` (bind address, default `{127,0,0,1}`), `:require_auth?`, `:password`.
+Main options for `start_link/1`: `:port` (default `0` = random), `:mode` (`:mock_first`, `:stateful_only`, `:mock_only`), `:name` (registered name), `:ip` (bind address, default `{127,0,0,1}`), `:require_auth?`, `:password`, `:script_timeout` (max `EVAL`/`EVALSHA` run time in ms, default `5_000`).
 
 ```elixir
 test "simple PING/ECHO with random port" do
@@ -376,6 +376,16 @@ Supported:
   return `NOSCRIPT`. `SCRIPT EXISTS` and `SCRIPT FLUSH` work as in Redis, and
   `FauxRedis.reset!/1` also clears cached scripts.
 
+Timeouts:
+
+- every `EVAL` / `EVALSHA` is limited by the `:script_timeout` option of
+  `start_link/1` (default `5_000` ms), e.g. `FauxRedis.start_link(script_timeout: 100)`
+- a script that runs longer is killed, the client gets
+  `BUSY script timed out after N ms` and the server keeps serving other commands
+- writes made by a killed script are discarded, because the script runs on a
+  copy of the state; a script that ends with a regular error keeps its writes,
+  as in Redis
+
 Limitations:
 
 - `redis.call` uses the built-in command implementations directly; mock rules
@@ -383,8 +393,11 @@ Limitations:
 - calls made from inside a script are not recorded in `FauxRedis.calls/1`
 - `EVAL`, `EVALSHA`, `SCRIPT`, `SUBSCRIBE` and `UNSUBSCRIBE` are rejected inside scripts
 - luerl implements Lua 5.3, while Redis uses Lua 5.1; `cjson`, `cmsgpack`,
-  `bit` and `struct` are not available, and there are no script timeouts or
-  `SCRIPT KILL`
+  `bit` and `struct` are not available
+- timeouts differ from Redis: there, `BUSY` is returned to *other* clients while
+  the script keeps running until `SCRIPT KILL` / `SHUTDOWN NOSAVE`; here the
+  script is killed automatically, its caller gets the error and its writes are
+  discarded. `SCRIPT KILL` is not supported
 
 ## Architectural overview
 
