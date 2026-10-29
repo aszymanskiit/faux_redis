@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-19
+
+### Added
+
+- Sorted set commands `ZADD` (with `NX`, `XX`, `GT`, `LT`, `CH`), `ZRANGE`
+  (with `REV`, `WITHSCORES`), `ZSCORE` and `ZREM` (`Store.zadd/4`,
+  `Store.zrange/5`, `Store.zscore/3`, `Store.zrem/3` and server handlers).
+- Lua scripting: `EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT EXISTS`,
+  `SCRIPT FLUSH` (`FauxRedis.Script`, built on the pure-Erlang `luerl` VM;
+  `redis.call` / `redis.pcall` run against the in-memory store).
+- `:script_timeout` option (default `5_000` ms): scripts running longer are
+  killed, return a `BUSY` error and their writes are discarded.
+- New runtime dependency: `luerl ~> 1.2`.
+- Unit and integration tests for sorted set commands and Lua scripting.
+- README sections documenting sorted set and scripting behaviour and limitations.
+
+### Fixed
+
+- `GET` / `MGET` no longer crash on keys holding a sorted set (return `nil`).
+
 ## [1.0.3] - 2026-06-12
 
 ### Added

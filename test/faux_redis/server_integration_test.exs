@@ -259,6 +259,190 @@ defmodule FauxRedis.ServerIntegrationTest do
     cleanup_test_socket()
   end
 
+  @wrongtype {:error, "WRONGTYPE Operation against a key holding the wrong kind of value"}
+
+  test "ZADD and ZRANGE return members ordered by score", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    assert [3] = send_recv(socket, [["ZADD", "z", "2", "b", "1", "a", "2.5", "c"]])
+    assert [["a", "b", "c"]] = send_recv(socket, [["ZRANGE", "z", "0", "-1"]])
+    assert [["c", "b"]] = send_recv(socket, [["ZRANGE", "z", "0", "1", "REV"]])
+
+    assert [["a", "1", "b", "2", "c", "2.5"]] =
+             send_recv(socket, [["ZRANGE", "z", "0", "-1", "WITHSCORES"]])
+
+    assert [[]] = send_recv(socket, [["ZRANGE", "missing", "0", "-1"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "ZADD flags NX, XX, GT, LT and CH", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    assert [1] = send_recv(socket, [["ZADD", "z", "5", "a"]])
+    assert [0] = send_recv(socket, [["ZADD", "z", "NX", "1", "a"]])
+    assert [0] = send_recv(socket, [["ZADD", "z", "XX", "1", "new"]])
+    assert [1] = send_recv(socket, [["ZADD", "z", "gt", "ch", "6", "a"]])
+    assert [0] = send_recv(socket, [["ZADD", "z", "LT", "CH", "7", "a"]])
+    assert ["6"] = send_recv(socket, [["ZSCORE", "z", "a"]])
+    assert [nil] = send_recv(socket, [["ZSCORE", "z", "new"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "ZADD rejects invalid arguments", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    assert [{:error, "ERR XX and NX options at the same time are not compatible"}] =
+             send_recv(socket, [["ZADD", "z", "NX", "XX", "1", "a"]])
+
+    assert [{:error, "ERR GT, LT, and/or NX options at the same time are not compatible"}] =
+             send_recv(socket, [["ZADD", "z", "GT", "LT", "1", "a"]])
+
+    assert [{:error, "ERR value is not a valid float"}] =
+             send_recv(socket, [["ZADD", "z", "abc", "a"]])
+
+    assert [{:error, "ERR syntax error"}] = send_recv(socket, [["ZADD", "z", "1"]])
+    assert [0] = send_recv(socket, [["EXISTS", "z"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "ZREM removes members and deletes the key when empty", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["ZADD", "z", "1", "a", "2", "b"]])
+    assert [1] = send_recv(socket, [["ZREM", "z", "a", "missing"]])
+    assert [["b"]] = send_recv(socket, [["ZRANGE", "z", "0", "-1"]])
+    assert [1] = send_recv(socket, [["ZREM", "z", "b"]])
+    assert [0] = send_recv(socket, [["EXISTS", "z"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "sorted set commands return WRONGTYPE for non-zset keys", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["SET", "str", "v"]])
+    assert [@wrongtype] = send_recv(socket, [["ZADD", "str", "1", "a"]])
+    assert [@wrongtype] = send_recv(socket, [["ZRANGE", "str", "0", "-1"]])
+    assert [@wrongtype] = send_recv(socket, [["ZSCORE", "str", "a"]])
+    assert [@wrongtype] = send_recv(socket, [["ZREM", "str", "a"]])
+  after
+    cleanup_test_socket()
+  end
+
+  @release_script """
+  local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+
+  if score and tonumber(score) > tonumber(ARGV[2]) then
+    return 0
+  end
+
+  redis.call('ZREM', KEYS[1], ARGV[1])
+  redis.call('DEL', KEYS[2])
+
+  return 0
+  """
+
+  test "EVAL keeps the member when its score is newer than the threshold", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["ZADD", "locks", "200", "job"], ["SET", "lock:job", "x"]])
+
+    assert [0] =
+             send_recv(socket, [["EVAL", @release_script, "2", "locks", "lock:job", "job", "100"]])
+
+    assert ["200"] = send_recv(socket, [["ZSCORE", "locks", "job"]])
+    assert ["x"] = send_recv(socket, [["GET", "lock:job"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "EVAL removes the member and key when the score is old enough", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    _ = send_recv(socket, [["ZADD", "locks", "50", "job"], ["SET", "lock:job", "x"]])
+
+    assert [0] =
+             send_recv(socket, [["EVAL", @release_script, "2", "locks", "lock:job", "job", "100"]])
+
+    assert [nil] = send_recv(socket, [["ZSCORE", "locks", "job"]])
+    assert [0] = send_recv(socket, [["EXISTS", "lock:job"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "EVAL returns values and errors like Redis", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    assert [["k", "a", 1]] =
+             send_recv(socket, [["EVAL", "return {KEYS[1], ARGV[1], 1}", "1", "k", "a"]])
+
+    assert [{:error, "ERR Number of keys can't be greater than number of args"}] =
+             send_recv(socket, [["EVAL", "return 1", "2", "k"]])
+
+    _ = send_recv(socket, [["SET", "str", "v"]])
+
+    assert [{:error, "WRONGTYPE Operation against a key holding the wrong kind of value"}] =
+             send_recv(socket, [["EVAL", "return redis.call('ZSCORE', KEYS[1], 'm')", "1", "str"]])
+
+    assert [{:error, "ERR This Redis command is not allowed from script"}] =
+             send_recv(socket, [["EVAL", "return redis.call('EVAL', 'return 1', '0')", "0"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "EVAL sees status replies as {ok = ...} tables", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+
+    assert [["OK", "PONG", "OK"]] =
+             send_recv(socket, [
+               [
+                 "EVAL",
+                 "return {redis.call('SET', KEYS[1], 'v').ok, redis.call('PING').ok, redis.call('FLUSHALL').ok}",
+                 "1",
+                 "k"
+               ]
+             ])
+
+    assert [1] =
+             send_recv(socket, [
+               ["EVAL", "return type(redis.call('SET', KEYS[1], 'v')) == 'table'", "1", "k"]
+             ])
+  after
+    cleanup_test_socket()
+  end
+
+  test "EVAL is killed after :script_timeout and the server keeps working" do
+    server = start_supervised!({FauxRedis.Server, script_timeout: 100})
+    socket = connect_and_put_socket(FauxRedis.Server.port(server))
+
+    assert [{:error, "BUSY script timed out after 100 ms"}] =
+             send_recv(socket, [["EVAL", "redis.call('SET', 'k', 'v') while true do end", "0"]])
+
+    assert ["PONG", 0] = send_recv(socket, [["PING"], ["EXISTS", "k"]])
+    assert [1] = send_recv(socket, [["EVAL", "return 1", "0"]])
+  after
+    cleanup_test_socket()
+  end
+
+  test "SCRIPT LOAD, SCRIPT EXISTS and EVALSHA", %{redis_port: port} do
+    socket = connect_and_put_socket(port)
+    sha = "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
+
+    assert [{:error, "NOSCRIPT No matching script. Please use EVAL."}] =
+             send_recv(socket, [["EVALSHA", sha, "0"]])
+
+    assert [^sha] = send_recv(socket, [["SCRIPT", "LOAD", "return 1"]])
+    assert [[1, 0]] = send_recv(socket, [["SCRIPT", "EXISTS", sha, "deadbeef"]])
+    assert [1] = send_recv(socket, [["EVALSHA", String.upcase(sha), "0"]])
+    assert ["OK"] = send_recv(socket, [["SCRIPT", "FLUSH"]])
+    assert [[0]] = send_recv(socket, [["SCRIPT", "EXISTS", sha]])
+  after
+    cleanup_test_socket()
+  end
+
   test "SCAN with MATCH and COUNT returns matching keys", %{redis_port: port} do
     socket = connect_and_put_socket(port)
 

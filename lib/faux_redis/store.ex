@@ -21,6 +21,9 @@ defmodule FauxRedis.Store do
           | {:hash, %{binary() => binary()}}
           | {:set, MapSet.t(binary())}
           | {:list, [binary()]}
+          | {:zset, %{binary() => float()}}
+
+  @wrongtype "WRONGTYPE Operation against a key holding the wrong kind of value"
 
   @spec system_now() :: integer()
   def system_now, do: System.system_time(:second)
@@ -39,6 +42,7 @@ defmodule FauxRedis.Store do
       {:hash, _} -> {store, nil}
       {:set, _} -> {store, nil}
       {:list, _} -> {store, nil}
+      {:zset, _} -> {store, nil}
       value when is_binary(value) -> {store, value}
       value when is_integer(value) -> {store, Integer.to_string(value)}
     end
@@ -210,8 +214,6 @@ defmodule FauxRedis.Store do
     end
   end
 
-  @wrongtype "WRONGTYPE Operation against a key holding the wrong kind of value"
-
   @spec scard(t(), binary()) :: {t(), non_neg_integer() | {:error, binary()}}
   def scard(store, key) do
     store = purge_expired(store)
@@ -340,6 +342,7 @@ defmodule FauxRedis.Store do
          {:hash, _} -> nil
          {:set, _} -> nil
          {:list, _} -> nil
+         {:zset, _} -> nil
          value when is_binary(value) -> value
          value when is_integer(value) -> Integer.to_string(value)
        end
@@ -384,6 +387,132 @@ defmodule FauxRedis.Store do
     new_val = current_int + delta
     kv = Map.put(kv, key, new_val)
     {%{store | kv: kv}, new_val}
+  end
+
+  # Sorted sets
+
+  @type zadd_opts :: %{
+          optional(:nx) => boolean(),
+          optional(:xx) => boolean(),
+          optional(:gt) => boolean(),
+          optional(:lt) => boolean(),
+          optional(:ch) => boolean()
+        }
+
+  @spec zadd(t(), binary(), [{float(), binary()}], zadd_opts()) ::
+          {t(), non_neg_integer() | {:error, binary()}}
+  def zadd(store, key, pairs, opts \\ %{}) do
+    store = purge_expired(store)
+
+    case fetch_zset(store, key) do
+      {:ok, zset} ->
+        {new_zset, added, changed} =
+          Enum.reduce(pairs, {zset, 0, 0}, fn pair, acc -> zadd_step(pair, acc, opts) end)
+
+        kv =
+          if map_size(new_zset) == 0,
+            do: store.kv,
+            else: Map.put(store.kv, key, {:zset, new_zset})
+
+        result = if Map.get(opts, :ch, false), do: added + changed, else: added
+        {%{store | kv: kv}, result}
+
+      error ->
+        {store, error}
+    end
+  end
+
+  defp zadd_step({score, member}, {zset, added, changed}, opts) do
+    case Map.fetch(zset, member) do
+      :error ->
+        if Map.get(opts, :xx, false),
+          do: {zset, added, changed},
+          else: {Map.put(zset, member, score), added + 1, changed}
+
+      {:ok, old} ->
+        if zadd_update?(old, score, opts),
+          do: {Map.put(zset, member, score), added, changed + 1},
+          else: {zset, added, changed}
+    end
+  end
+
+  defp zadd_update?(old, score, opts) do
+    cond do
+      Map.get(opts, :nx, false) -> false
+      score == old -> false
+      Map.get(opts, :gt, false) -> score > old
+      Map.get(opts, :lt, false) -> score < old
+      true -> true
+    end
+  end
+
+  @spec zrange(t(), binary(), integer(), integer(), boolean()) ::
+          {t(), [{binary(), float()}] | {:error, binary()}}
+  def zrange(store, key, start, stop, rev? \\ false) do
+    store = purge_expired(store)
+
+    case fetch_zset(store, key) do
+      {:ok, zset} ->
+        sorted = Enum.sort_by(zset, fn {member, score} -> {score, member} end)
+        sorted = if rev?, do: Enum.reverse(sorted), else: sorted
+        {store, slice_by_index(sorted, start, stop)}
+
+      error ->
+        {store, error}
+    end
+  end
+
+  defp slice_by_index(list, start, stop) do
+    len = length(list)
+    start = if start < 0, do: max(len + start, 0), else: start
+    stop = if stop < 0, do: len + stop, else: min(stop, len - 1)
+
+    if start > stop or start >= len do
+      []
+    else
+      Enum.slice(list, start..stop//1)
+    end
+  end
+
+  @spec zscore(t(), binary(), binary()) :: {t(), nil | float() | {:error, binary()}}
+  def zscore(store, key, member) do
+    store = purge_expired(store)
+
+    case fetch_zset(store, key) do
+      {:ok, zset} -> {store, Map.get(zset, member)}
+      error -> {store, error}
+    end
+  end
+
+  @spec zrem(t(), binary(), [binary()]) :: {t(), non_neg_integer() | {:error, binary()}}
+  def zrem(store, key, members) do
+    store = purge_expired(store)
+
+    case fetch_zset(store, key) do
+      {:ok, zset} ->
+        new_zset = Map.drop(zset, members)
+        removed = map_size(zset) - map_size(new_zset)
+
+        {kv, ttl} =
+          if map_size(new_zset) == 0 do
+            {Map.delete(store.kv, key), Map.delete(store.ttl, key)}
+          else
+            {Map.put(store.kv, key, {:zset, new_zset}), store.ttl}
+          end
+
+        {%{store | kv: kv, ttl: ttl}, removed}
+
+      error ->
+        {store, error}
+    end
+  end
+
+  defp fetch_zset(store, key) do
+    case Map.get(store.kv, key) do
+      nil -> {:ok, %{}}
+      {:zset, zset} -> {:ok, zset}
+      _ -> {:error, @wrongtype}
+    end
   end
 
   @spec reset(t()) :: t()

@@ -11,7 +11,7 @@ defmodule FauxRedis.Server do
   use GenServer
 
   require Logger
-  alias FauxRedis.{Command, MockEngine, MockRule, Store}
+  alias FauxRedis.{Command, MockEngine, MockRule, Script, Store}
 
   @typedoc "Internal server mode."
   @type mode :: :mock_first | :stateful_only | :mock_only
@@ -32,6 +32,8 @@ defmodule FauxRedis.Server do
           authed: MapSet.t(non_neg_integer()),
           subscriptions: %{pid() => MapSet.t(binary())},
           channels: %{binary() => MapSet.t(pid())},
+          scripts: %{binary() => binary()},
+          script_timeout: timeout(),
           ets_kv: term()
         }
 
@@ -49,6 +51,8 @@ defmodule FauxRedis.Server do
             authed: MapSet.new(),
             subscriptions: %{},
             channels: %{},
+            scripts: %{},
+            script_timeout: 5_000,
             ets_kv: nil
 
   ## Public API
@@ -62,6 +66,7 @@ defmodule FauxRedis.Server do
     * `:mode` – `:mock_first` (default), `:stateful_only`, or `:mock_only`
     * `:require_auth?` – whether AUTH is required before most commands
     * `:password` – the expected password for AUTH
+    * `:script_timeout` – max time in ms an `EVAL`/`EVALSHA` script may run (default `5_000`)
     * `:name` – optional registered name (e.g. via `Registry`)
   """
   @spec start_link(Keyword.t()) :: GenServer.on_start()
@@ -136,6 +141,7 @@ defmodule FauxRedis.Server do
 
     require_auth? = Keyword.get(opts, :require_auth?, false)
     password = Keyword.get(opts, :password)
+    script_timeout = Keyword.get(opts, :script_timeout, 5_000)
     port = Keyword.get(opts, :port, 0)
     ip = Keyword.get(opts, :ip, {127, 0, 0, 1})
 
@@ -160,6 +166,7 @@ defmodule FauxRedis.Server do
       mode: mode,
       require_auth?: require_auth?,
       password: password,
+      script_timeout: script_timeout,
       listener: listener,
       port: actual_port,
       ets_kv: ets_kv
@@ -222,7 +229,8 @@ defmodule FauxRedis.Server do
         calls: [],
         authed: MapSet.new(),
         subscriptions: %{},
-        channels: %{}
+        channels: %{},
+        scripts: %{}
     }
 
     {:reply, :ok, new_state}
@@ -389,7 +397,7 @@ defmodule FauxRedis.Server do
   @spec do_handle(non_neg_integer(), non_neg_integer(), Command.t(), t()) ::
           {term(), t(), non_neg_integer()}
   defp do_handle(_conn_id, db, %Command{name: "PING", args: []}, state) do
-    {"PONG", state, db}
+    {{:simple_string, "PONG"}, state, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "PING", args: [msg]}, state) do
@@ -467,7 +475,7 @@ defmodule FauxRedis.Server do
   defp do_handle(_conn_id, db, %Command{name: "INFO"}, state) do
     payload = """
     # Server
-    faux_redis:0.1.0
+    faux_redis:#{app_version()}
 
     # Clients
     connected_clients:#{map_size(state.connections)}
@@ -505,7 +513,7 @@ defmodule FauxRedis.Server do
     # Redix.pipeline/2 yields ["OK", 1] for SET+EXPIRE pipelines used
     # by TemporarySubscriptions.LastSeenTracker.
     store = Store.set(state.store, key, value)
-    {"OK", %{state | store: store}, db}
+    {:ok, %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "DEL", args: keys}, state) do
@@ -643,6 +651,73 @@ defmodule FauxRedis.Server do
     end
   end
 
+  defp do_handle(_conn_id, db, %Command{name: "ZADD", args: [key | rest]}, state) do
+    case parse_zadd_args(rest) do
+      {:ok, opts, pairs} ->
+        {store, result} = Store.zadd(state.store, key, pairs, opts)
+        {result, %{state | store: store}, db}
+
+      error ->
+        {error, state, db}
+    end
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "ZRANGE", args: [key, start, stop | opts]}, state) do
+    with {:ok, start} <- parse_integer_arg(start),
+         {:ok, stop} <- parse_integer_arg(stop),
+         {:ok, rev?, withscores?} <- parse_zrange_opts(opts, false, false) do
+      {store, result} = Store.zrange(state.store, key, start, stop, rev?)
+      {zrange_reply(result, withscores?), %{state | store: store}, db}
+    else
+      error -> {error, state, db}
+    end
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "ZSCORE", args: [key, member]}, state) do
+    {store, result} = Store.zscore(state.store, key, member)
+
+    case result do
+      {:error, msg} -> {{:error, msg}, %{state | store: store}, db}
+      nil -> {nil, %{state | store: store}, db}
+      score -> {format_score(score), %{state | store: store}, db}
+    end
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "ZREM", args: [key | [_ | _] = members]}, state) do
+    {store, result} = Store.zrem(state.store, key, members)
+    {result, %{state | store: store}, db}
+  end
+
+  defp do_handle(conn_id, db, %Command{name: "EVAL", args: [script, numkeys | rest]}, state) do
+    state = %{state | scripts: Map.put(state.scripts, Script.sha1(script), script)}
+    run_script(conn_id, db, script, numkeys, rest, state)
+  end
+
+  defp do_handle(conn_id, db, %Command{name: "EVALSHA", args: [sha, numkeys | rest]}, state) do
+    case Map.fetch(state.scripts, String.downcase(sha)) do
+      {:ok, script} -> run_script(conn_id, db, script, numkeys, rest, state)
+      :error -> {{:error, "NOSCRIPT No matching script. Please use EVAL."}, state, db}
+    end
+  end
+
+  defp do_handle(_conn_id, db, %Command{name: "SCRIPT", args: [subcommand | args]}, state) do
+    case {String.upcase(subcommand), args} do
+      {"LOAD", [script]} ->
+        sha = Script.sha1(script)
+        {sha, %{state | scripts: Map.put(state.scripts, sha, script)}, db}
+
+      {"EXISTS", [_ | _] = shas} ->
+        {Enum.map(shas, &if(Map.has_key?(state.scripts, String.downcase(&1)), do: 1, else: 0)),
+         state, db}
+
+      {"FLUSH", _mode} ->
+        {:ok, %{state | scripts: %{}}, db}
+
+      _ ->
+        {{:error, "ERR unknown subcommand or wrong number of arguments for 'SCRIPT'"}, state, db}
+    end
+  end
+
   defp do_handle(_conn_id, db, %Command{name: "LPUSH", args: [key | values]}, state) do
     {store, len} = Store.lpush(state.store, key, values)
     {len, %{state | store: store}, db}
@@ -682,7 +757,7 @@ defmodule FauxRedis.Server do
   defp do_handle(_conn_id, db, %Command{name: "FLUSHALL", args: []}, state) do
     # Reset the entire in-memory store for all logical keys.
     store = Store.reset(state.store)
-    {"OK", %{state | store: store}, db}
+    {:ok, %{state | store: store}, db}
   end
 
   defp do_handle(_conn_id, db, %Command{name: "INCR", args: [key]}, state) do
@@ -799,4 +874,139 @@ defmodule FauxRedis.Server do
   end
 
   defp parse_positive_count(_), do: nil
+
+  # Helpers for scripting
+
+  @script_forbidden ~w(EVAL EVALSHA SCRIPT SUBSCRIBE UNSUBSCRIBE)
+
+  defp run_script(conn_id, db, script, numkeys, rest, state) do
+    case parse_numkeys(numkeys, length(rest)) do
+      {:ok, n} ->
+        {keys, args} = Enum.split(rest, n)
+        call_fun = &script_call(conn_id, db, &1, &2)
+        task = Task.async(fn -> Script.eval(script, keys, args, state, call_fun) end)
+
+        # The script runs on its own copy of the state, so writes made before
+        # a timeout are discarded together with the killed task.
+        case Task.yield(task, state.script_timeout) || Task.shutdown(task, :brutal_kill) do
+          {:ok, {reply, state}} ->
+            {reply, state, db}
+
+          nil ->
+            {{:error, "BUSY script timed out after #{state.script_timeout} ms"}, state, db}
+        end
+
+      error ->
+        {error, state, db}
+    end
+  end
+
+  defp script_call(conn_id, db, argv, state) do
+    command = Command.from_array(argv, conn_id, db)
+
+    if command.name in @script_forbidden do
+      {{:error, "ERR This Redis command is not allowed from script"}, state}
+    else
+      {reply, state, _db} = do_handle(conn_id, db, command, state)
+      {reply, state}
+    end
+  end
+
+  defp parse_numkeys(numkeys, argc) do
+    case Integer.parse(numkeys) do
+      {n, ""} when n < 0 -> {:error, "ERR Number of keys can't be negative"}
+      {n, ""} when n > argc -> {:error, "ERR Number of keys can't be greater than number of args"}
+      {n, ""} -> {:ok, n}
+      _ -> {:error, "ERR value is not an integer or out of range"}
+    end
+  end
+
+  # Helpers for sorted set commands
+
+  @zadd_flags %{"NX" => :nx, "XX" => :xx, "GT" => :gt, "LT" => :lt, "CH" => :ch}
+
+  defp parse_zadd_args(args) do
+    {flags, rest} = Enum.split_while(args, &Map.has_key?(@zadd_flags, String.upcase(&1)))
+    opts = Map.new(flags, &{Map.fetch!(@zadd_flags, String.upcase(&1)), true})
+
+    with :ok <- validate_zadd_opts(opts),
+         {:ok, pairs} <- parse_score_pairs(rest) do
+      {:ok, opts, pairs}
+    end
+  end
+
+  defp validate_zadd_opts(%{nx: true, xx: true}),
+    do: {:error, "ERR XX and NX options at the same time are not compatible"}
+
+  defp validate_zadd_opts(opts) do
+    if Enum.count([:nx, :gt, :lt], &Map.get(opts, &1, false)) > 1 do
+      {:error, "ERR GT, LT, and/or NX options at the same time are not compatible"}
+    else
+      :ok
+    end
+  end
+
+  defp parse_score_pairs([]), do: {:error, "ERR syntax error"}
+
+  defp parse_score_pairs(args) when rem(length(args), 2) == 1, do: {:error, "ERR syntax error"}
+
+  defp parse_score_pairs(args) do
+    args
+    |> Enum.chunk_every(2)
+    |> Enum.reduce_while({:ok, []}, &parse_score_pair/2)
+    |> case do
+      {:ok, pairs} -> {:ok, Enum.reverse(pairs)}
+      error -> error
+    end
+  end
+
+  defp parse_score_pair([score, member], {:ok, acc}) do
+    case parse_score(score) do
+      {:ok, s} -> {:cont, {:ok, [{s, member} | acc]}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp parse_score(bin) do
+    case Float.parse(bin) do
+      {score, ""} -> {:ok, score}
+      _ -> {:error, "ERR value is not a valid float"}
+    end
+  rescue
+    _ -> {:error, "ERR value is not a valid float"}
+  end
+
+  defp parse_integer_arg(bin) do
+    case Integer.parse(bin) do
+      {int, ""} -> {:ok, int}
+      _ -> {:error, "ERR value is not an integer or out of range"}
+    end
+  end
+
+  defp parse_zrange_opts([], rev?, withscores?), do: {:ok, rev?, withscores?}
+
+  defp parse_zrange_opts([opt | rest], rev?, withscores?) do
+    case String.upcase(opt) do
+      "REV" -> parse_zrange_opts(rest, true, withscores?)
+      "WITHSCORES" -> parse_zrange_opts(rest, rev?, true)
+      _ -> {:error, "ERR syntax error"}
+    end
+  end
+
+  defp zrange_reply({:error, _} = error, _withscores?), do: error
+
+  defp zrange_reply(entries, true),
+    do: Enum.flat_map(entries, fn {member, score} -> [member, format_score(score)] end)
+
+  defp zrange_reply(entries, false), do: Enum.map(entries, fn {member, _score} -> member end)
+
+  # Redis prints integral scores without a fractional part ("1", not "1.0").
+  defp format_score(score) when score == trunc(score) and abs(score) < 1.0e17,
+    do: Integer.to_string(trunc(score))
+
+  defp format_score(score), do: Float.to_string(score)
+
+  defp app_version do
+    Application.spec(:faux_redis, :vsn)
+  end
 end

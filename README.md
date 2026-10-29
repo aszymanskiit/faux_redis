@@ -28,9 +28,11 @@ integration tests. Suggested GitHub repo: `faux_redis` (slug: `faux-redis`).
   - `GET`, `SET`, `DEL`, `EXISTS`, `EXPIRE`, `TTL`, `KEYS`, `SCAN`, `FLUSHALL`
   - `HGET`, `HSET`, `HGETALL`, `HMGET`, `HMSET`
   - `SADD`, `SMEMBERS`, `SREM`, `SISMEMBER`, `SCARD`, `SSCAN`
+  - `ZADD`, `ZRANGE`, `ZSCORE`, `ZREM`
   - `LPUSH`, `RPUSH`, `LPOP`, `RPOP`
   - `MGET`, `MSET`, `INCR`, `DECR`
   - `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE` (simplified)
+  - `EVAL`, `EVALSHA`, `SCRIPT LOAD | EXISTS | FLUSH` (Lua scripting)
 - **Mock/stub engine**:
   - Match by command name, arguments, regex, custom predicate (`{:fn, fun}`), or connection id.
   - Define:
@@ -71,7 +73,7 @@ provided ExUnit case template.
 
 ### Starting manually inside a test
 
-Main options for `start_link/1`: `:port` (default `0` = random), `:mode` (`:mock_first`, `:stateful_only`, `:mock_only`), `:name` (registered name), `:ip` (bind address, default `{127,0,0,1}`), `:require_auth?`, `:password`.
+Main options for `start_link/1`: `:port` (default `0` = random), `:mode` (`:mock_first`, `:stateful_only`, `:mock_only`), `:name` (registered name), `:ip` (bind address, default `{127,0,0,1}`), `:require_auth?`, `:password`, `:script_timeout` (max `EVAL`/`EVALSHA` run time in ms, default `5_000`).
 
 ```elixir
 test "simple PING/ECHO with random port" do
@@ -269,14 +271,14 @@ in a single test suite** to simulate multiple Redis backends if necessary.
 `SCAN cursor [MATCH pattern] [COUNT count]` and `KEYS pattern` filter keys using
 Redis glob patterns:
 
-| Pattern | Meaning |
-|---------|---------|
-| `*` | any number of characters |
-| `?` | exactly one character |
-| `[aeiou]` | one character from the set |
-| `[^aeiou]` | one character not in the set |
-| `[a-z]` | character range inside a class |
-| `\?`, `\*`, … | match `?`, `*` literally |
+| Pattern       | Meaning                        |
+|---------------|--------------------------------|
+| `*`           | any number of characters       |
+| `?`           | exactly one character          |
+| `[aeiou]`     | one character from the set     |
+| `[^aeiou]`    | one character not in the set   |
+| `[a-z]`       | character range inside a class |
+| `\?`, `\*`, … | match `?`, `*` literally       |
 
 Examples over TCP (RESP arrays):
 
@@ -311,6 +313,92 @@ Redis-compatible behaviour:
 - wrong key type → `WRONGTYPE` error (unlike `SISMEMBER`, which returns `0` for non-sets)
 - after `SREM` removes the last member, the key is deleted and `SCARD` returns `0`
 
+## Sorted sets (`ZADD`, `ZRANGE`, `ZSCORE`, `ZREM`)
+
+Sorted sets keep members ordered by score (ties broken lexicographically by member):
+
+```elixir
+["ZADD", "board", "10", "alice", "7.5", "bob"]   # => 2
+["ZRANGE", "board", "0", "-1"]                   # => ["bob", "alice"]
+["ZRANGE", "board", "0", "-1", "REV", "WITHSCORES"]
+# => ["alice", "10", "bob", "7.5"]
+["ZSCORE", "board", "bob"]                       # => "7.5"
+["ZREM", "board", "bob", "nobody"]               # => 1
+```
+
+Supported options:
+
+- `ZADD key [NX|XX] [GT|LT] [CH] score member [score member ...]` – Redis
+  validation rules apply (`NX`+`XX`, `GT`+`LT` and `NX`+`GT/LT` are rejected,
+  non-numeric scores return `ERR value is not a valid float`)
+- `ZRANGE key start stop [REV] [WITHSCORES]` – index-based ranges, including
+  negative indices
+
+Behaviour:
+
+- missing key → `ZRANGE` returns `[]`, `ZSCORE` returns `nil`, `ZREM` returns `0`
+- wrong key type → `WRONGTYPE` error for all four commands
+- after `ZREM` removes the last member, the key is deleted
+
+Limitations: `ZADD INCR`, `ZRANGE BYSCORE` / `BYLEX` / `LIMIT` and infinite
+scores (`-inf` / `+inf`) are not supported.
+
+## Lua scripting (`EVAL`, `EVALSHA`, `SCRIPT`)
+
+Scripts run on [luerl](https://hex.pm/packages/luerl), a Lua VM written in pure
+Erlang, against the same in-memory store as regular commands:
+
+```elixir
+script = """
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+
+if score and tonumber(score) > tonumber(ARGV[2]) then
+  return 0
+end
+
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('DEL', KEYS[2])
+
+return 0
+"""
+
+["EVAL", script, "2", "locks", "lock:job", "job", "100"]   # => 0
+```
+
+Supported:
+
+- `KEYS` / `ARGV`, `redis.call`, `redis.pcall`, `redis.status_reply`,
+  `redis.error_reply`, `redis.sha1hex`, `redis.log` (no-op)
+- Redis-compatible value conversion in both directions (nil bulk → `false`,
+  status → `{ok = ...}`, errors → `{err = ...}`, Lua numbers → integers
+  truncated towards zero, arrays stop at the first `nil`)
+- `EVALSHA` with scripts registered by `EVAL` or `SCRIPT LOAD`; unknown digests
+  return `NOSCRIPT`. `SCRIPT EXISTS` and `SCRIPT FLUSH` work as in Redis, and
+  `FauxRedis.reset!/1` also clears cached scripts.
+
+Timeouts:
+
+- every `EVAL` / `EVALSHA` is limited by the `:script_timeout` option of
+  `start_link/1` (default `5_000` ms), e.g. `FauxRedis.start_link(script_timeout: 100)`
+- a script that runs longer is killed, the client gets
+  `BUSY script timed out after N ms` and the server keeps serving other commands
+- writes made by a killed script are discarded, because the script runs on a
+  copy of the state; a script that ends with a regular error keeps its writes,
+  as in Redis
+
+Limitations:
+
+- `redis.call` uses the built-in command implementations directly; mock rules
+  apply to the `EVAL` / `EVALSHA` command itself, not to commands the script issues
+- calls made from inside a script are not recorded in `FauxRedis.calls/1`
+- `EVAL`, `EVALSHA`, `SCRIPT`, `SUBSCRIBE` and `UNSUBSCRIBE` are rejected inside scripts
+- luerl implements Lua 5.3, while Redis uses Lua 5.1; `cjson`, `cmsgpack`,
+  `bit` and `struct` are not available
+- timeouts differ from Redis: there, `BUSY` is returned to *other* clients while
+  the script keeps running until `SCRIPT KILL` / `SHUTDOWN NOSAVE`; here the
+  script is killed automatically, its caller gets the error and its writes are
+  discarded. `SCRIPT KILL` is not supported
+
 ## Architectural overview
 
 - `FauxRedis.Application` – starts a `Registry` for optional server naming.
@@ -327,6 +415,7 @@ Redis-compatible behaviour:
   - applies response specifications (delays, closes, partials, etc.)
 - `FauxRedis.RESP` – RESP2 encoder/decoder.
 - `FauxRedis.Store` – in-memory Redis-like store.
+- `FauxRedis.Script` – Lua script execution for `EVAL` / `EVALSHA` (luerl).
 - `FauxRedis.MockRule` / `MockEngine` – rule representation and evaluation.
 - `FauxRedis.Case` – ExUnit helper case template.
 
