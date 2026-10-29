@@ -1006,7 +1006,7 @@ defmodule FauxRedis.Server do
 
   defp format_score(score), do: Float.to_string(score)
 
-  defp app_version() do
+  defp app_version do
     Application.spec(:faux_redis, :vsn)
   end
 end
