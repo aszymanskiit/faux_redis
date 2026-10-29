@@ -972,8 +972,8 @@ defmodule FauxRedis.Server do
       {score, ""} -> {:ok, score}
       _ -> {:error, "ERR value is not a valid float"}
     end
-    rescue
-      _ -> {:error, "ERR value is not a valid float"}
+  rescue
+    _ -> {:error, "ERR value is not a valid float"}
   end
 
   defp parse_integer_arg(bin) do
